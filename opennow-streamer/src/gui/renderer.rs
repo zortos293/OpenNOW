@@ -176,32 +176,51 @@ impl Renderer {
             })?;
 
         // Get adapter
-        // ARM64 Linux: Try software renderer (llvmpipe) first since V3D Vulkan OOMs
-        // The V3D driver has memory management issues with wgpu
-        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-        let (power_preference, force_fallback) = {
-            // Check if user explicitly wants hardware GPU
-            let force_hw = std::env::var("OPENNOW_FORCE_HARDWARE_GPU").is_ok();
-            if force_hw {
-                info!("ARM64 Linux: Forcing hardware GPU (OPENNOW_FORCE_HARDWARE_GPU set)");
-                (wgpu::PowerPreference::LowPower, false)
-            } else {
-                info!("ARM64 Linux: Using software renderer (llvmpipe) for stability");
-                info!("  Set OPENNOW_FORCE_HARDWARE_GPU=1 to try hardware GPU");
-                (wgpu::PowerPreference::LowPower, true)
-            }
-        };
         #[cfg(not(all(target_os = "linux", target_arch = "aarch64")))]
-        let (power_preference, force_fallback) = (wgpu::PowerPreference::HighPerformance, false);
-
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference,
+                power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
-                force_fallback_adapter: force_fallback,
+                force_fallback_adapter: false,
             })
             .await
             .context("Failed to find GPU adapter")?;
+
+        // ARM64 Linux: Try hardware GPU first, fall back to llvmpipe if it fails
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        let adapter = {
+            let force_sw = std::env::var("OPENNOW_FORCE_SOFTWARE_GPU").is_ok();
+
+            if force_sw {
+                info!("ARM64 Linux: Forcing software renderer (OPENNOW_FORCE_SOFTWARE_GPU set)");
+                instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: true,
+                }).await.context("Failed to find software GPU adapter")?
+            } else {
+                // Try hardware GPU first
+                info!("ARM64 Linux: Trying hardware GPU...");
+                match instance.request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::LowPower,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                }).await {
+                    Some(hw_adapter) => {
+                        info!("  Hardware GPU found: {}", hw_adapter.get_info().name);
+                        hw_adapter
+                    }
+                    None => {
+                        warn!("  No hardware GPU found, using software renderer");
+                        instance.request_adapter(&wgpu::RequestAdapterOptions {
+                            power_preference: wgpu::PowerPreference::LowPower,
+                            compatible_surface: Some(&surface),
+                            force_fallback_adapter: true,
+                        }).await.context("Failed to find any GPU adapter")?
+                    }
+                }
+            }
+        };
 
         let adapter_info = adapter.get_info();
         info!("GPU: {} (Backend: {:?}, Driver: {})", 
@@ -231,35 +250,32 @@ impl Renderer {
             info!("EXTERNAL_TEXTURE not supported - using NV12 shader path");
         }
 
-        // Detect Raspberry Pi (V3D/VideoCore) for memory-constrained settings
-        let is_raspberry_pi = adapter_info.name.to_lowercase().contains("v3d")
-            || adapter_info.name.to_lowercase().contains("videocore")
-            || adapter_info.name.to_lowercase().contains("broadcom");
+        // Detect Raspberry Pi V3D hardware GPU for ultra-minimal settings
+        let is_v3d_hardware = adapter_info.name.to_lowercase().contains("v3d")
+            || adapter_info.name.to_lowercase().contains("videocore");
+        // Detect if we're on ARM64 Linux (includes llvmpipe on Pi)
+        let is_arm64_linux = cfg!(all(target_os = "linux", target_arch = "aarch64"));
 
-        // Use downlevel defaults for broader compatibility (e.g., Raspberry Pi 5/Vulcan)
-        // device.limits() will automatically be clamped to the adapter's actual limits
-        // but explicit downlevel_defaults avoids requesting limits the driver can't provide.
-        let mut limits = wgpu::Limits::downlevel_defaults()
-            .using_resolution(adapter.limits());
-
-        // Raspberry Pi 5: Use very conservative limits to avoid OOM
-        // The V3D GPU has limited memory and aggressive allocation causes crashes
-        if is_raspberry_pi {
-            info!("Raspberry Pi detected - using memory-conservative limits");
-            // Use absolute minimum limits to avoid OOM
-            limits.max_texture_dimension_2d = 2048; // 2048 for 1080p, reduce to 1024 if still OOM
-            limits.max_texture_dimension_1d = 2048;
-            limits.max_buffer_size = 64 * 1024 * 1024; // 64MB max buffer
-            limits.max_uniform_buffer_binding_size = 16 * 1024; // 16KB uniform
-            limits.max_storage_buffer_binding_size = 64 * 1024 * 1024; // 64MB storage
-            // Reduce bind groups and samplers
-            limits.max_bind_groups = 4;
-            limits.max_samplers_per_shader_stage = 4;
-            limits.max_sampled_textures_per_shader_stage = 8;
-            info!("  Max texture: {}, Max buffer: {}MB",
-                limits.max_texture_dimension_2d,
-                limits.max_buffer_size / (1024 * 1024));
-        }
+        // Use appropriate limits based on GPU type
+        let limits = if is_v3d_hardware {
+            // V3D hardware: Use WebGL2 defaults (absolute minimum) to avoid OOM
+            info!("V3D hardware GPU detected - using ultra-minimal WebGL2 limits");
+            let mut lim = wgpu::Limits::downlevel_webgl2_defaults();
+            // Override with slightly higher values needed for video rendering
+            lim.max_texture_dimension_2d = 2048; // Need 1920x1080 video
+            lim.max_buffer_size = 16 * 1024 * 1024; // 16MB - minimal
+            lim.max_uniform_buffer_binding_size = 16 * 1024;
+            lim.max_storage_buffer_binding_size = 16 * 1024 * 1024;
+            info!("  Max texture: 2048, Max buffer: 16MB");
+            lim
+        } else if is_arm64_linux {
+            // llvmpipe or other ARM64: Use downlevel defaults
+            info!("ARM64 Linux: Using downlevel defaults");
+            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+        } else {
+            // Desktop: Use full adapter limits
+            wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits())
+        };
 
         info!("Requesting device limits: Max Texture Dimension 2D: {}", limits.max_texture_dimension_2d);
 
@@ -288,9 +304,9 @@ impl Renderer {
             .unwrap_or(surface_caps.formats[0]);
 
         // Use Immediate for lowest latency - frame pacing is handled by our render loop
-        // Exception: Raspberry Pi uses Fifo to reduce memory usage (Immediate needs extra buffers)
-        let present_mode = if is_raspberry_pi {
-            info!("Raspberry Pi: Using Fifo present mode to conserve memory");
+        // Exception: V3D hardware uses Fifo to reduce memory usage (Immediate needs extra buffers)
+        let present_mode = if is_v3d_hardware {
+            info!("V3D GPU: Using Fifo present mode to conserve memory");
             wgpu::PresentMode::Fifo
         } else if surface_caps.present_modes.contains(&wgpu::PresentMode::Immediate) {
             wgpu::PresentMode::Immediate
@@ -301,9 +317,9 @@ impl Renderer {
         };
         info!("Using present mode: {:?}", present_mode);
 
-        // Raspberry Pi: Use minimum frame latency (1) to reduce memory usage
+        // V3D hardware: Use minimum frame latency (1) to reduce memory usage
         // Other devices: Use 2 for smoother frame pacing
-        let frame_latency = if is_raspberry_pi { 1 } else { 2 };
+        let frame_latency = if is_v3d_hardware { 1 } else { 2 };
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
