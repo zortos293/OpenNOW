@@ -60,8 +60,15 @@ jobs:
           # Increment patch version
           NEW_PATCH=$((PATCH + 1))
 
-          NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
-          VERSION_NUMBER="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          # Force minimum version to v0.2.0
+          if [ "$MAJOR" -eq 0 ] && [ "$MINOR" -lt 2 ]; then
+            echo "Current version ($MAJOR.$MINOR.$PATCH) is older than 0.2.0. Bumping to v0.2.0"
+            NEW_VERSION="v0.2.0"
+            VERSION_NUMBER="0.2.0"
+          else
+            NEW_VERSION="v${MAJOR}.${MINOR}.${NEW_PATCH}"
+            VERSION_NUMBER="${MAJOR}.${MINOR}.${NEW_PATCH}"
+          fi
 
           echo "New version: $NEW_VERSION"
           echo "Version number: $VERSION_NUMBER"
