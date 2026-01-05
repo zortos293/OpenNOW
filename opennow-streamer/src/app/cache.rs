@@ -631,9 +631,6 @@ pub fn load_queue_cache() -> Option<Vec<QueueServerInfo>> {
     let content = std::fs::read_to_string(&path).ok()?;
     let cache: Vec<serde_json::Value> = serde_json::from_str(&content).ok()?;
 
-    // Clear the file after loading to trigger refresh on next access
-    let _ = std::fs::remove_file(&path);
-
     Some(
         cache
             .into_iter()
