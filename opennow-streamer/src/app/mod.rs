@@ -1690,6 +1690,9 @@ impl App {
         self.cursor_captured = true;
         self.is_loading = false;
 
+        // Reset session ready poll count for this new session
+        self.session_ready_poll_count = 0;
+
         // Initialize session timing for proper input timestamps
         // This must be called BEFORE any input events are sent
         crate::input::init_session_timing();
@@ -1699,6 +1702,10 @@ impl App {
         let (width, height) = parse_resolution(&self.settings.resolution);
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         crate::input::set_local_cursor_dimensions(width, height);
+
+        // Reset coalescing state to ensure clean input state for new session
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        crate::input::reset_coalescing();
 
         info!(
             "Input system initialized: session timing + local cursor {}x{}",
@@ -1719,7 +1726,7 @@ impl App {
 
         self.stats_rx = Some(stats_rx);
 
-        // Create input handler
+        // Create input handler with clean state
         let input_handler = Arc::new(InputHandler::new());
         self.input_handler = Some(input_handler.clone());
 
@@ -1806,6 +1813,10 @@ impl App {
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         crate::input::reset_coalescing();
 
+        // Clear raw input sender to prevent stale events from being processed
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        crate::input::clear_raw_input_sender();
+
         self.cursor_captured = false;
         self.state = AppState::Games;
         self.streaming_session = None;
@@ -1817,6 +1828,9 @@ impl App {
         self.selected_game = None;
         self.is_loading = false;
         self.error_message = None;
+
+        // Reset session ready poll count for next session
+        self.session_ready_poll_count = 0;
 
         self.status_message = "Stream ended".to_string();
     }
