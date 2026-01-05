@@ -474,9 +474,10 @@ impl ApplicationHandler for OpenNowApp {
                 }
             }
         } else {
-            // Non-streaming: use normal request_redraw for UI updates
+            // Non-streaming: ControlFlow::Wait handles wakeup on input events
+            // Redraws are triggered by window events (mouse, keyboard, resize, etc.)
+            // No need to request_redraw here - that would create a continuous loop
             drop(app_guard);
-            renderer.window().request_redraw();
         }
     }
 }
