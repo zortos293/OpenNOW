@@ -517,6 +517,7 @@ impl VulkanVideoDecoder {
             color_range: ColorRange::Limited,
             color_space: ColorSpace::BT709,
             transfer_function: TransferFunction::SDR,
+            gpu_frame: None, // No zero-copy GPU surface yet (placeholder implementation)
         }))
     }
 
