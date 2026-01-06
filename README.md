@@ -104,7 +104,7 @@ These features are not found in the official client:
 | **Theming** | 🚧 | Full UI customization and community themes. |
 | **Multi-account** | 🚧 | Switch between GFN accounts seamlessly. |
 | **Anti-AFK** | ✅ | Prevent session timeout (Ctrl+Shift+F10). |
-| **Queue Monitor** | 🚧 | printedwaste integration by [@Kief5555](https://github.com/Kief5555) (View server queues). |
+| **Queue Monitor** | ✅ | printedwaste integration by [@Kief5555](https://github.com/Kief5555) (View server queues). |
 
 ### Controls & Shortcuts
 
