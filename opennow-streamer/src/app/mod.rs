@@ -636,8 +636,8 @@ impl App {
 
     /// Update application state (called each frame)
     pub fn update(&mut self) {
-        // Track render FPS
-        self.render_frame_count += 1;
+        // Track render FPS - we'll increment frame count only when we get a new video frame
+        // This ensures render FPS matches decode FPS, not the UI repaint rate
         let now = std::time::Instant::now();
         let elapsed = now.duration_since(self.last_render_fps_time).as_secs_f64();
         if elapsed >= 1.0 {
@@ -703,6 +703,9 @@ impl App {
                     );
                 }
                 self.current_frame = Some(frame);
+                // Increment render frame count only when we get a new video frame
+                // This ensures render FPS matches decode FPS
+                self.render_frame_count += 1;
             }
         }
 
