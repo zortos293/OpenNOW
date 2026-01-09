@@ -38,9 +38,6 @@ pub mod vaapi;
 #[cfg(target_os = "linux")]
 pub mod v4l2;
 
-#[cfg(target_os = "linux")]
-pub mod vulkan_video;
-
 // GStreamer decoder available on Linux and Windows
 #[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod gstreamer_decoder;
@@ -75,20 +72,12 @@ pub use v4l2::{
 };
 
 #[cfg(target_os = "linux")]
-pub use vulkan_video::{
-    get_supported_vulkan_codecs, is_vulkan_video_available, DecoderStats as VulkanDecoderStats,
-    VulkanVideoCodec, VulkanVideoConfig, VulkanVideoDecoder,
-};
-
-#[cfg(target_os = "linux")]
 pub use gstreamer_decoder::{
     is_gstreamer_v4l2_available, GStreamerDecoder, GstCodec, GstDecoderConfig,
 };
 
 #[cfg(target_os = "windows")]
-pub use gstreamer_decoder::{
-    is_gstreamer_available, GStreamerDecoder, GstCodec, GstDecoderConfig,
-};
+pub use gstreamer_decoder::{is_gstreamer_available, GStreamerDecoder, GstCodec, GstDecoderConfig};
 
 /// Pixel format of decoded video frame
 #[derive(Debug, Clone, Copy, PartialEq, Default)]

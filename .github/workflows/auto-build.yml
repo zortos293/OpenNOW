@@ -869,7 +869,8 @@ jobs:
           # Copy GStreamer plugins
           echo ""
           echo "=== Phase 1c: Copy GStreamer plugins ==="
-          GST_PLUGINS_DIR="$CONTENTS_DIR/PlugIns/gstreamer-1.0"
+          # Put plugins in Frameworks directory (not PlugIns) to avoid code signing issues
+          GST_PLUGINS_DIR="$FRAMEWORKS_DIR/gstreamer-1.0"
           mkdir -p "$GST_PLUGINS_DIR"
 
           # Find plugins from various plugin packages
@@ -983,6 +984,29 @@ jobs:
             done
           fi
 
+          # Fix GStreamer plugin references
+          echo "Fixing GStreamer plugin references..."
+          if [ -d "$FRAMEWORKS_DIR/gstreamer-1.0" ]; then
+            for plugin in "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib; do
+               [ -f "$plugin" ] || continue
+               # Fix Homebrew path references to point to parent Frameworks dir
+               for dep in $(otool -L "$plugin" 2>/dev/null | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
+                  depname=$(basename "$dep")
+                  if [ -f "$FRAMEWORKS_DIR/$depname" ]; then
+                      echo "  Fixing ref in $(basename "$plugin") to $depname"
+                      install_name_tool -change "$dep" "@loader_path/../$depname" "$plugin" 2>/dev/null || true
+                  fi
+               done
+               # Fix @rpath references
+               for dep in $(otool -L "$plugin" 2>/dev/null | grep "@rpath/" | awk '{print $1}'); do
+                  filename="${dep#@rpath/}"
+                  if [ -f "$FRAMEWORKS_DIR/$filename" ]; then
+                      echo "  Rewriting @rpath ref in $(basename "$plugin"): $dep -> @loader_path/../$filename"
+                      install_name_tool -change "$dep" "@loader_path/../$filename" "$plugin" 2>/dev/null || true
+                  fi
+               done
+            done
+          fi
 
           echo ""
           echo "=== Final verification ==="
@@ -1004,8 +1028,32 @@ jobs:
           echo ""
           echo "=== Phase 5: Code Signing ==="
           echo "Signing app bundle..."
-          # Sign with ad-hoc signature (-) to fix invalid signatures caused by install_name_tool
-          codesign --force --deep --sign - "$APP_DIR"
+
+          # Sign GStreamer plugins individually first (they're in Frameworks/gstreamer-1.0)
+          if [ -d "$FRAMEWORKS_DIR/gstreamer-1.0" ]; then
+            echo "Signing GStreamer plugins..."
+            for plugin in "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib; do
+              if [ -f "$plugin" ]; then
+                codesign --force --sign - "$plugin" 2>/dev/null || true
+              fi
+            done
+          fi
+
+          # Sign all dylibs in Frameworks
+          echo "Signing framework libraries..."
+          for lib in "$FRAMEWORKS_DIR/"*.dylib; do
+            if [ -f "$lib" ]; then
+              codesign --force --sign - "$lib" 2>/dev/null || true
+            fi
+          done
+
+          # Sign the main binary
+          echo "Signing main binary..."
+          codesign --force --sign - "$MACOS_DIR/$APP_NAME" 2>/dev/null || true
+
+          # Finally sign the whole app bundle
+          echo "Signing app bundle..."
+          codesign --force --sign - "$APP_DIR"
 
           # Zip the app bundle for upload/release
           echo "Zipping .app bundle..."

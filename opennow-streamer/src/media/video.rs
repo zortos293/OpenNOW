@@ -363,14 +363,14 @@ pub fn get_supported_decoder_backends() -> Vec<VideoDecoderBackend> {
                 let gpu = detect_gpu_vendor();
                 let qsv = check_qsv_available();
 
-                // Native D3D11VA decoder (HEVC only) - direct hardware decoding without FFmpeg
-                // Uses NVIDIA-style RTArray texture approach for best performance
-                // Note: Only supports HEVC. H.264 streams use DXVA2/D3D11VA via FFmpeg
-                backends.push(VideoDecoderBackend::NativeDxva);
-
-                // DXVA2/D3D11VA via FFmpeg - supports both H.264 and HEVC
-                // Works on all Windows GPUs (NVIDIA, AMD, Intel)
+                // GStreamer D3D11 decoder - supports both H.264 and HEVC
+                // This is the recommended decoder for Windows (stable, works on all GPUs)
                 backends.push(VideoDecoderBackend::Dxva);
+
+                // Native D3D11VA decoder (HEVC only) - EXPERIMENTAL
+                // Uses direct D3D11 Video API for zero-copy decoding
+                // WARNING: Only supports HEVC. H.264 streams will fail!
+                backends.push(VideoDecoderBackend::NativeDxva);
 
                 // GPU-specific accelerators
                 if gpu == GpuVendor::Nvidia {
@@ -387,11 +387,10 @@ pub fn get_supported_decoder_backends() -> Vec<VideoDecoderBackend> {
                 let gpu = detect_gpu_vendor();
                 let qsv = check_qsv_available();
 
-                // Vulkan Video - cross-GPU hardware decode (GFN-style)
-                // This is the preferred decoder on modern Linux systems
-                // Works on NVIDIA, AMD (via RADV), and Intel (via ANV)
-                if super::vulkan_video::is_vulkan_video_available() {
-                    backends.push(VideoDecoderBackend::VulkanVideo);
+                // GStreamer with hardware acceleration is the preferred decoder on Linux
+                // It automatically selects the best available hardware decoder (VAAPI, NVDEC, etc.)
+                if super::gstreamer_decoder::is_gstreamer_available() {
+                    backends.push(VideoDecoderBackend::VulkanVideo); // GStreamer-based hardware decode
                 }
 
                 if gpu == GpuVendor::Nvidia {
@@ -513,116 +512,11 @@ impl VideoDecoder {
             ));
         }
 
-        // On Linux, use native decoders (no FFmpeg):
-        // 1. Try Vulkan Video first (modern GPUs: Intel Arc, NVIDIA RTX, AMD RDNA2+)
-        // 2. Fall back to GStreamer V4L2 (Raspberry Pi and embedded devices)
+        // On Linux, use GStreamer for hardware-accelerated decoding
+        // GStreamer automatically selects the best available backend (VAAPI, NVDEC, V4L2, etc.)
         #[cfg(target_os = "linux")]
         {
-            // Try Vulkan Video first (for H.264/H.265 - AV1 falls through to GStreamer)
-            // Note: Vulkan Video AV1 decode requires full AV1 OBU parsing which isn't implemented yet
-            let use_vulkan = super::vulkan_video::is_vulkan_video_available()
-                && matches!(codec, VideoCodec::H264 | VideoCodec::H265);
-
-            if use_vulkan {
-                info!(
-                    "Trying Vulkan Video decoder for {:?} (GFN-style native GPU decode)",
-                    codec
-                );
-
-                // Map codec to Vulkan Video codec
-                let vulkan_codec = match codec {
-                    VideoCodec::H264 => super::vulkan_video::VulkanVideoCodec::H264,
-                    VideoCodec::H265 => super::vulkan_video::VulkanVideoCodec::H265,
-                    VideoCodec::AV1 => unreachable!(), // AV1 uses GStreamer path
-                };
-
-                let config = super::vulkan_video::VulkanVideoConfig {
-                    codec: vulkan_codec,
-                    width: 1920,
-                    height: 1080,
-                    is_10bit: false,
-                    num_decode_surfaces: 20,
-                    low_latency: true, // Enable low latency for streaming
-                };
-
-                match super::vulkan_video::VulkanVideoDecoder::new(config) {
-                    Ok(vulkan_decoder) => {
-                        info!("Vulkan Video decoder created successfully!");
-
-                        let (cmd_tx, cmd_rx) = mpsc::channel::<DecoderCommand>();
-                        let (frame_tx, frame_rx) = mpsc::channel::<Option<VideoFrame>>();
-                        let (stats_tx, stats_rx) = tokio_mpsc::channel::<DecodeStats>(64);
-
-                        let shared_frame_clone = shared_frame.clone();
-
-                        thread::spawn(move || {
-                            info!("Vulkan Video decoder thread started");
-                            let mut decoder = vulkan_decoder;
-                            let mut frames_decoded = 0u64;
-                            let mut consecutive_failures = 0u32;
-                            const KEYFRAME_REQUEST_THRESHOLD: u32 = 10;
-                            const FRAMES_TO_SKIP: u64 = 5;
-
-                            while let Ok(cmd) = cmd_rx.recv() {
-                                match cmd {
-                                    DecoderCommand::Decode(data) => {
-                                        let result = decoder.decode(&data);
-                                        let _ = frame_tx.send(result.ok().flatten());
-                                    }
-                                    DecoderCommand::DecodeAsync { data, receive_time } => {
-                                        let result = decoder.decode(&data);
-                                        let decode_time_ms =
-                                            receive_time.elapsed().as_secs_f32() * 1000.0;
-
-                                        let frame_produced = matches!(&result, Ok(Some(_)));
-
-                                        let needs_keyframe = if frame_produced {
-                                            consecutive_failures = 0;
-                                            false
-                                        } else {
-                                            consecutive_failures += 1;
-                                            consecutive_failures == KEYFRAME_REQUEST_THRESHOLD
-                                        };
-
-                                        if let Ok(Some(frame)) = result {
-                                            frames_decoded += 1;
-                                            if frames_decoded > FRAMES_TO_SKIP {
-                                                shared_frame_clone.write(frame);
-                                            }
-                                        }
-
-                                        let _ = stats_tx.try_send(DecodeStats {
-                                            decode_time_ms,
-                                            frame_produced,
-                                            needs_keyframe,
-                                        });
-                                    }
-                                    DecoderCommand::Stop => break,
-                                }
-                            }
-                            info!("Vulkan Video decoder thread stopped");
-                        });
-
-                        let decoder = Self {
-                            cmd_tx,
-                            frame_rx,
-                            stats_rx: None,
-                            hw_accel: true,
-                            frames_decoded: 0,
-                            shared_frame: Some(shared_frame),
-                        };
-
-                        return Ok((decoder, stats_rx));
-                    }
-                    Err(e) => {
-                        warn!("Vulkan Video decoder failed: {}, trying GStreamer...", e);
-                    }
-                }
-            } else {
-                info!("Vulkan Video not available, trying GStreamer...");
-            }
-
-            // Fall back to GStreamer (V4L2 for Raspberry Pi, VA/VAAPI for desktop, or software)
+            // Use GStreamer decoder (auto-selects V4L2/VAAPI/NVDEC/software)
             // The GStreamer decoder automatically selects the best available backend
             if super::gstreamer_decoder::is_gstreamer_available() {
                 info!(
@@ -1715,8 +1609,8 @@ impl VideoDecoder {
                 warn!("All hardware decoders failed, will use software decoder");
             }
 
-            // Note: Linux hardware decoder handling removed - Linux now uses native Vulkan Video decoder
-            // via new_async() instead of FFmpeg. See vulkan_video.rs for the implementation.
+            // Note: Linux hardware decoder handling uses GStreamer via new_async() instead of FFmpeg.
+            // See gstreamer_decoder.rs for the implementation.
         }
 
         // Fall back to software decoder
@@ -2428,103 +2322,91 @@ impl UnifiedVideoDecoder {
     /// Create a new unified decoder with the specified backend
     pub fn new_async(
         codec: VideoCodec,
-        _backend: VideoDecoderBackend,
+        backend: VideoDecoderBackend,
         shared_frame: Arc<SharedFrame>,
     ) -> Result<(Self, tokio_mpsc::Receiver<DecodeStats>)> {
-        // Windows: Use GStreamer for H.264, Native DXVA for HEVC
+        // Windows: Use GStreamer D3D11 by default, Native DXVA only for HEVC when explicitly selected
         #[cfg(target_os = "windows")]
         {
-            match codec {
+            // Determine if we should use native DXVA decoder
+            // Native DXVA only supports HEVC and must be explicitly selected
+            let use_native =
+                backend == VideoDecoderBackend::NativeDxva && codec == VideoCodec::H265;
+
+            if use_native {
+                // Native D3D11 Video decoder (HEVC only) - EXPERIMENTAL
+                // Only used when explicitly selected by user
+                info!("Creating native DXVA decoder for HEVC (experimental)");
+
+                let (native_decoder, native_stats_rx) =
+                    super::native_video::NativeVideoDecoder::new_async(
+                        codec,
+                        shared_frame.clone(),
+                    )?;
+
+                info!("Native DXVA HEVC decoder created successfully");
+
+                // Convert NativeDecodeStats to DecodeStats via a bridge channel
+                let (stats_tx, stats_rx) = tokio_mpsc::channel::<DecodeStats>(64);
+
+                // Spawn a task to convert stats
+                tokio::spawn(async move {
+                    let mut native_rx = native_stats_rx;
+                    while let Some(native_stats) = native_rx.recv().await {
+                        let stats = DecodeStats {
+                            decode_time_ms: native_stats.decode_time_ms,
+                            frame_produced: native_stats.frame_produced,
+                            needs_keyframe: native_stats.needs_keyframe,
+                        };
+                        if stats_tx.send(stats).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                return Ok((UnifiedVideoDecoder::Native(native_decoder), stats_rx));
+            }
+
+            // Default: Use GStreamer D3D11 decoder for all codecs
+            // This is stable and supports H.264, H.265, and AV1
+            let gst_codec = match codec {
                 VideoCodec::H264 => {
-                    // H.264: Use GStreamer with D3D11 hardware acceleration
                     info!("Creating GStreamer D3D11 decoder for H.264");
-
-                    let gst_config = super::gstreamer_decoder::GstDecoderConfig {
-                        codec: super::gstreamer_decoder::GstCodec::H264,
-                        width: 1920,
-                        height: 1080,
-                        low_latency: true,
-                    };
-
-                    let gst_decoder = super::gstreamer_decoder::GStreamerDecoder::new(gst_config)
-                        .map_err(|e| anyhow!("Failed to create GStreamer H.264 decoder: {}", e))?;
-
-                    info!("GStreamer D3D11 H.264 decoder created successfully");
-
-                    let (stats_tx, stats_rx) = tokio_mpsc::channel::<DecodeStats>(64);
-
-                    let wrapper = GStreamerDecoderWrapper {
-                        decoder: gst_decoder,
-                        shared_frame: shared_frame.clone(),
-                        stats_tx,
-                        frames_decoded: 0,
-                        consecutive_failures: 0,
-                    };
-
-                    return Ok((UnifiedVideoDecoder::GStreamer(wrapper), stats_rx));
+                    super::gstreamer_decoder::GstCodec::H264
                 }
                 VideoCodec::H265 => {
-                    // HEVC: Use native DXVA decoder (better performance, RTArray support)
-                    info!("Creating native DXVA decoder for HEVC");
-
-                    let (native_decoder, native_stats_rx) =
-                        super::native_video::NativeVideoDecoder::new_async(
-                            codec,
-                            shared_frame.clone(),
-                        )?;
-
-                    info!("Native DXVA HEVC decoder created successfully");
-
-                    // Convert NativeDecodeStats to DecodeStats via a bridge channel
-                    let (stats_tx, stats_rx) = tokio_mpsc::channel::<DecodeStats>(64);
-
-                    // Spawn a task to convert stats
-                    tokio::spawn(async move {
-                        let mut native_rx = native_stats_rx;
-                        while let Some(native_stats) = native_rx.recv().await {
-                            let stats = DecodeStats {
-                                decode_time_ms: native_stats.decode_time_ms,
-                                frame_produced: native_stats.frame_produced,
-                                needs_keyframe: native_stats.needs_keyframe,
-                            };
-                            if stats_tx.send(stats).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
-
-                    return Ok((UnifiedVideoDecoder::Native(native_decoder), stats_rx));
+                    info!("Creating GStreamer D3D11 decoder for H.265");
+                    super::gstreamer_decoder::GstCodec::H265
                 }
                 VideoCodec::AV1 => {
-                    // AV1: Use GStreamer with D3D11 hardware acceleration
-                    // Requires GPU with AV1 decode support (RTX 30+, RX 6000+, Intel Arc)
                     info!("Creating GStreamer D3D11 decoder for AV1");
-
-                    let gst_config = super::gstreamer_decoder::GstDecoderConfig {
-                        codec: super::gstreamer_decoder::GstCodec::AV1,
-                        width: 1920,
-                        height: 1080,
-                        low_latency: true,
-                    };
-
-                    let gst_decoder = super::gstreamer_decoder::GStreamerDecoder::new(gst_config)
-                        .map_err(|e| anyhow!("Failed to create GStreamer AV1 decoder: {}", e))?;
-
-                    info!("GStreamer D3D11 AV1 decoder created successfully");
-
-                    let (stats_tx, stats_rx) = tokio_mpsc::channel::<DecodeStats>(64);
-
-                    let wrapper = GStreamerDecoderWrapper {
-                        decoder: gst_decoder,
-                        shared_frame: shared_frame.clone(),
-                        stats_tx,
-                        frames_decoded: 0,
-                        consecutive_failures: 0,
-                    };
-
-                    return Ok((UnifiedVideoDecoder::GStreamer(wrapper), stats_rx));
+                    super::gstreamer_decoder::GstCodec::AV1
                 }
-            }
+            };
+
+            let gst_config = super::gstreamer_decoder::GstDecoderConfig {
+                codec: gst_codec,
+                width: 1920,
+                height: 1080,
+                low_latency: true,
+            };
+
+            let gst_decoder = super::gstreamer_decoder::GStreamerDecoder::new(gst_config)
+                .map_err(|e| anyhow!("Failed to create GStreamer {:?} decoder: {}", codec, e))?;
+
+            info!("GStreamer D3D11 {:?} decoder created successfully", codec);
+
+            let (stats_tx, stats_rx) = tokio_mpsc::channel::<DecodeStats>(64);
+
+            let wrapper = GStreamerDecoderWrapper {
+                decoder: gst_decoder,
+                shared_frame: shared_frame.clone(),
+                stats_tx,
+                frames_decoded: 0,
+                consecutive_failures: 0,
+            };
+
+            return Ok((UnifiedVideoDecoder::GStreamer(wrapper), stats_rx));
         }
 
         // macOS/Linux: Use FFmpeg decoder
@@ -2616,23 +2498,24 @@ impl GStreamerDecoderWrapper {
                 // No frame produced yet (buffering or B-frame reordering)
                 self.consecutive_failures += 1;
 
-                let needs_keyframe = if self.consecutive_failures == Self::KEYFRAME_REQUEST_THRESHOLD {
-                    warn!(
-                        "GStreamer: {} consecutive packets without frame - requesting keyframe",
-                        self.consecutive_failures
-                    );
-                    true
-                } else if self.consecutive_failures > Self::KEYFRAME_REQUEST_THRESHOLD
-                    && self.consecutive_failures % 20 == 0
-                {
-                    warn!(
-                        "GStreamer: Still failing after {} packets - requesting keyframe again",
-                        self.consecutive_failures
-                    );
-                    true
-                } else {
-                    false
-                };
+                let needs_keyframe =
+                    if self.consecutive_failures == Self::KEYFRAME_REQUEST_THRESHOLD {
+                        warn!(
+                            "GStreamer: {} consecutive packets without frame - requesting keyframe",
+                            self.consecutive_failures
+                        );
+                        true
+                    } else if self.consecutive_failures > Self::KEYFRAME_REQUEST_THRESHOLD
+                        && self.consecutive_failures % 20 == 0
+                    {
+                        warn!(
+                            "GStreamer: Still failing after {} packets - requesting keyframe again",
+                            self.consecutive_failures
+                        );
+                        true
+                    } else {
+                        false
+                    };
 
                 let decode_time_ms = decode_start.elapsed().as_secs_f32() * 1000.0;
                 let _ = self.stats_tx.try_send(DecodeStats {

@@ -98,7 +98,7 @@ impl Default for Settings {
             fps: 60,
             codec: VideoCodec::H264,
             max_bitrate_mbps: 150,
-            decoder_backend: VideoDecoderBackend::NativeDxva, // Force native DXVA decoder
+            decoder_backend: VideoDecoderBackend::Auto, // Auto-select best decoder
             color_quality: ColorQuality::Bit10Yuv420,
             hdr_enabled: false,
 
@@ -322,10 +322,10 @@ impl VideoDecoderBackend {
             VideoDecoderBackend::Cuvid => "NVDEC",
             VideoDecoderBackend::Qsv => "QuickSync",
             VideoDecoderBackend::Vaapi => "VA-API",
-            VideoDecoderBackend::Dxva => "DXVA",
-            VideoDecoderBackend::NativeDxva => "Native",
+            VideoDecoderBackend::Dxva => "D3D11 (GStreamer)",
+            VideoDecoderBackend::NativeDxva => "Native D3D11 (HEVC only)",
             VideoDecoderBackend::VideoToolbox => "VideoToolbox",
-            VideoDecoderBackend::VulkanVideo => "Vulkan Video",
+            VideoDecoderBackend::VulkanVideo => "GStreamer HW",
             VideoDecoderBackend::Software => "Software",
         }
     }
@@ -333,53 +333,69 @@ impl VideoDecoderBackend {
     /// Detailed description for tooltip
     pub fn description(&self) -> &'static str {
         match self {
-            VideoDecoderBackend::Auto =>
+            VideoDecoderBackend::Auto => {
                 "Automatically selects the best available decoder for your system.\n\n\
-                 Backend: Platform-dependent\n\
-                 Performance: Optimal for your hardware",
-            VideoDecoderBackend::Cuvid =>
+                 Windows: GStreamer D3D11 (d3d11h264dec/d3d11h265dec)\n\
+                 Linux: GStreamer with VA-API or V4L2\n\
+                 macOS: FFmpeg with VideoToolbox\n\
+                 Performance: Optimal for your hardware"
+            }
+            VideoDecoderBackend::Cuvid => {
                 "NVIDIA hardware decoding using NVDEC.\n\n\
                  Backend: GStreamer + nvd3d11h264dec/nvd3d11h265dec\n\
                  Performance: Excellent on NVIDIA GPUs\n\
-                 Compatibility: NVIDIA GPUs only (GTX 600+)",
-            VideoDecoderBackend::Qsv =>
+                 Compatibility: NVIDIA GPUs only (GTX 600+)"
+            }
+            VideoDecoderBackend::Qsv => {
                 "Intel hardware decoding using Quick Sync Video.\n\n\
                  Backend: GStreamer + qsvh264dec/qsvh265dec\n\
                  Performance: Good on Intel CPUs with integrated graphics\n\
-                 Compatibility: Intel 2nd gen Core+ with HD Graphics",
-            VideoDecoderBackend::Vaapi =>
+                 Compatibility: Intel 2nd gen Core+ with HD Graphics"
+            }
+            VideoDecoderBackend::Vaapi => {
                 "Linux hardware decoding via Video Acceleration API.\n\n\
-                 Backend: GStreamer + vaapih264dec/vaapih265dec\n\
+                 Backend: GStreamer + vah264dec/vah265dec (or legacy vaapih264dec)\n\
                  Performance: Good on AMD/Intel GPUs (Linux)\n\
-                 Compatibility: AMD, Intel GPUs on Linux",
-            VideoDecoderBackend::Dxva =>
-                "Windows DirectX Video Acceleration.\n\n\
+                 Compatibility: AMD, Intel GPUs on Linux\n\
+                 Note: Use this if GStreamer HW doesn't work"
+            }
+            VideoDecoderBackend::Dxva => {
+                "Windows DirectX Video Acceleration via GStreamer.\n\n\
                  Backend: GStreamer + d3d11h264dec/d3d11h265dec\n\
-                 Performance: Good hardware acceleration\n\
-                 Compatibility: Windows with any modern GPU",
-            VideoDecoderBackend::NativeDxva =>
-                "Direct D3D11 Video decoder with zero-copy.\n\n\
-                 Backend: GStreamer + d3d11h264dec/d3d11h265dec (optimized)\n\
-                 Performance: Best latency, zero-copy to GPU\n\
+                 Performance: Good hardware acceleration, stable\n\
+                 Compatibility: Windows with any modern GPU\n\
+                 Note: Recommended for Windows (supports H.264 and H.265)"
+            }
+            VideoDecoderBackend::NativeDxva => {
+                "Direct D3D11 Video decoder (EXPERIMENTAL).\n\n\
+                 Backend: Native Windows D3D11 Video API\n\
+                 Performance: Zero-copy to GPU, lowest latency\n\
                  Compatibility: Windows 8+ with D3D11 GPU\n\
-                 Note: Recommended for lowest latency",
-            VideoDecoderBackend::VideoToolbox =>
+                 WARNING: Only supports H.265/HEVC! H.264 will fail.\n\
+                 Use 'D3D11 (GStreamer)' for H.264 streams."
+            }
+            VideoDecoderBackend::VideoToolbox => {
                 "macOS hardware decoding using Apple's VideoToolbox.\n\n\
-                 Backend: GStreamer + vtdec\n\
+                 Backend: FFmpeg + VideoToolbox\n\
                  Performance: Excellent on Apple Silicon/Intel Macs\n\
-                 Compatibility: macOS only",
-            VideoDecoderBackend::VulkanVideo =>
-                "Cross-platform GPU decoding via Vulkan extensions.\n\n\
-                 Backend: GStreamer + vulkanvideodec\n\
-                 Performance: Good, direct GPU decode\n\
-                 Compatibility: Vulkan 1.3+ GPUs with video extensions\n\
-                 Note: Experimental, based on GFN's approach",
-            VideoDecoderBackend::Software =>
+                 Compatibility: macOS only"
+            }
+            VideoDecoderBackend::VulkanVideo => {
+                "GStreamer hardware decoding (Linux).\n\n\
+                 Backend: GStreamer auto-selects best decoder:\n\
+                 - V4L2 (Raspberry Pi / embedded)\n\
+                 - VA plugin (Intel/AMD desktop)\n\
+                 - VAAPI plugin (legacy fallback)\n\
+                 Performance: Hardware accelerated\n\
+                 Compatibility: Linux with GStreamer installed"
+            }
+            VideoDecoderBackend::Software => {
                 "CPU-based software decoding.\n\n\
                  Backend: GStreamer + avdec_h264/avdec_h265\n\
                  Performance: Slow, high CPU usage\n\
                  Compatibility: Any system (fallback)\n\
-                 Note: Use only if hardware decode fails",
+                 Note: Use only if hardware decode fails"
+            }
         }
     }
 
@@ -391,9 +407,9 @@ impl VideoDecoderBackend {
             VideoDecoderBackend::Qsv => "GStreamer QSV",
             VideoDecoderBackend::Vaapi => "GStreamer VA-API",
             VideoDecoderBackend::Dxva => "GStreamer D3D11",
-            VideoDecoderBackend::NativeDxva => "GStreamer D3D11",
-            VideoDecoderBackend::VideoToolbox => "GStreamer VT",
-            VideoDecoderBackend::VulkanVideo => "GStreamer Vulkan",
+            VideoDecoderBackend::NativeDxva => "Native D3D11",
+            VideoDecoderBackend::VideoToolbox => "FFmpeg VT",
+            VideoDecoderBackend::VulkanVideo => "GStreamer HW",
             VideoDecoderBackend::Software => "GStreamer CPU",
         }
     }
