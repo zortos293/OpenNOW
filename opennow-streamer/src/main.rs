@@ -231,20 +231,22 @@ impl ApplicationHandler for OpenNowApp {
 
         // Request redraw based on app state:
         // - When streaming: always honor egui repaint (low latency needed)
+        // - When in session setup: always repaint (need to show progress updates)
         // - When not streaming: only repaint on actual user interaction events
         //   (egui's request_repaint_after handles timed repaints via ControlFlow)
         let app_state = self.app.lock().state;
         let should_repaint = match app_state {
-            AppState::Streaming => response.repaint,
+            AppState::Streaming | AppState::Session => response.repaint,
             _ => {
                 // Only repaint on actual input events, not egui's internal repaint requests
-                matches!(event,
-                    WindowEvent::MouseInput { .. } |
-                    WindowEvent::MouseWheel { .. } |
-                    WindowEvent::KeyboardInput { .. } |
-                    WindowEvent::CursorMoved { .. } |
-                    WindowEvent::Resized(_) |
-                    WindowEvent::Focused(_)
+                matches!(
+                    event,
+                    WindowEvent::MouseInput { .. }
+                        | WindowEvent::MouseWheel { .. }
+                        | WindowEvent::KeyboardInput { .. }
+                        | WindowEvent::CursorMoved { .. }
+                        | WindowEvent::Resized(_)
+                        | WindowEvent::Focused(_)
                 )
             }
         };
@@ -486,7 +488,9 @@ impl ApplicationHandler for OpenNowApp {
                                 if !delay.is_zero() {
                                     // Schedule a repaint after the delay
                                     let wake_time = std::time::Instant::now() + delay;
-                                    event_loop.set_control_flow(winit::event_loop::ControlFlow::WaitUntil(wake_time));
+                                    event_loop.set_control_flow(
+                                        winit::event_loop::ControlFlow::WaitUntil(wake_time),
+                                    );
                                 }
                             }
                         }
@@ -551,7 +555,7 @@ impl ApplicationHandler for OpenNowApp {
         };
 
         let app_guard = self.app.lock();
-        let is_streaming = app_guard.state == AppState::Streaming;
+        let app_state = app_guard.state;
         // Check if there's a new frame from the decoder before requesting redraw
         // This prevents rendering faster than decode rate, saving GPU cycles
         let has_new_frame = app_guard
@@ -561,20 +565,30 @@ impl ApplicationHandler for OpenNowApp {
             .unwrap_or(false);
         drop(app_guard);
 
-        // Dynamically switch control flow based on streaming state
+        // Dynamically switch control flow based on app state
         // Poll during streaming for lowest latency, Wait for menus to save CPU
-        if is_streaming {
-            _event_loop.set_control_flow(ControlFlow::Poll);
-            // Only request redraw when decoder has produced a new frame
-            // This synchronizes render rate to decode rate, avoiding wasted GPU cycles
-            if has_new_frame {
+        match app_state {
+            AppState::Streaming => {
+                _event_loop.set_control_flow(ControlFlow::Poll);
+                // Only request redraw when decoder has produced a new frame
+                // This synchronizes render rate to decode rate, avoiding wasted GPU cycles
+                if has_new_frame {
+                    renderer.window().request_redraw();
+                }
+            }
+            AppState::Session => {
+                // During session setup, poll at a reasonable rate (30 FPS) to show progress
+                // This ensures status updates are visible without wasting CPU
+                let wake_time = std::time::Instant::now() + std::time::Duration::from_millis(33);
+                _event_loop.set_control_flow(ControlFlow::WaitUntil(wake_time));
                 renderer.window().request_redraw();
             }
-        } else {
-            _event_loop.set_control_flow(ControlFlow::Wait);
-            // When not streaming, rely entirely on event-driven redraws
-            // ControlFlow::Wait will block until an event arrives
-            // This reduces CPU usage from 100% to <5% when idle
+            _ => {
+                _event_loop.set_control_flow(ControlFlow::Wait);
+                // When not streaming, rely entirely on event-driven redraws
+                // ControlFlow::Wait will block until an event arrives
+                // This reduces CPU usage from 100% to <5% when idle
+            }
         }
     }
 }
