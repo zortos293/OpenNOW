@@ -40,7 +40,7 @@ use crate::media::D3D11TextureWrapper;
 use crate::media::VAAPISurfaceWrapper;
 #[cfg(target_os = "macos")]
 use crate::media::{CVMetalTexture, MetalVideoRenderer, ZeroCopyTextureManager};
-use crate::media::{ColorSpace, PixelFormat, TransferFunction, VideoFrame, StreamStats};
+use crate::media::{ColorSpace, PixelFormat, StreamStats, TransferFunction, VideoFrame};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 #[cfg(target_os = "windows")]
@@ -1160,6 +1160,21 @@ impl Renderer {
             // On other platforms, try exclusive fullscreen
             #[cfg(not(target_os = "macos"))]
             {
+                // Wayland doesn't support exclusive fullscreen - use borderless instead
+                #[cfg(target_os = "linux")]
+                let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+                #[cfg(not(target_os = "linux"))]
+                let is_wayland = false;
+
+                if is_wayland {
+                    info!(
+                        "Wayland detected - using borderless fullscreen (exclusive not supported)"
+                    );
+                    self.window
+                        .set_fullscreen(Some(Fullscreen::Borderless(None)));
+                    return;
+                }
+
                 let current_monitor = self.window.current_monitor();
 
                 if let Some(monitor) = current_monitor {
@@ -1232,6 +1247,23 @@ impl Renderer {
     /// Enter fullscreen with a specific target refresh rate
     /// Useful when the stream FPS is known (e.g., 120fps stream -> 120Hz mode)
     pub fn set_fullscreen_with_refresh(&mut self, target_fps: u32) {
+        // Wayland doesn't support exclusive fullscreen - use borderless instead
+        #[cfg(target_os = "linux")]
+        let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+        #[cfg(not(target_os = "linux"))]
+        let is_wayland = false;
+
+        if is_wayland {
+            info!(
+                "Wayland detected - using borderless fullscreen for {}fps stream",
+                target_fps
+            );
+            self.fullscreen = true;
+            self.window
+                .set_fullscreen(Some(Fullscreen::Borderless(None)));
+            return;
+        }
+
         let current_monitor = self.window.current_monitor();
 
         if let Some(monitor) = current_monitor {
@@ -2212,7 +2244,10 @@ impl Renderer {
     ) {
         log::info!(
             "update_video_d3d11: {}x{}, array_index={}, is_texture_array={}",
-            frame.width, frame.height, gpu_frame.array_index(), gpu_frame.is_texture_array()
+            frame.width,
+            frame.height,
+            gpu_frame.array_index(),
+            gpu_frame.is_texture_array()
         );
 
         // Skip zero-copy for texture arrays (array_index > 0 means it's part of an array)
@@ -2474,8 +2509,12 @@ impl Renderer {
         log::info!("D3D11: Locking texture for CPU copy...");
         let planes = match gpu_frame.lock_and_get_planes() {
             Ok(p) => {
-                log::info!("D3D11: Got planes - y_size={}, uv_size={}, stride={}",
-                    p.y_plane.len(), p.uv_plane.len(), p.y_stride);
+                log::info!(
+                    "D3D11: Got planes - y_size={}, uv_size={}, stride={}",
+                    p.y_plane.len(),
+                    p.uv_plane.len(),
+                    p.y_stride
+                );
 
                 // Debug: Check Y plane data content
                 if !p.y_plane.is_empty() {
@@ -2484,9 +2523,15 @@ impl Renderer {
                     let sample = &p.y_plane[..sample_size];
                     let min_y = sample.iter().min().copied().unwrap_or(0);
                     let max_y = sample.iter().max().copied().unwrap_or(0);
-                    let avg_y: u32 = sample.iter().map(|&x| x as u32).sum::<u32>() / sample.len() as u32;
-                    log::info!("D3D11: Y plane stats (first {} bytes): min={}, max={}, avg={}",
-                        sample_size, min_y, max_y, avg_y);
+                    let avg_y: u32 =
+                        sample.iter().map(|&x| x as u32).sum::<u32>() / sample.len() as u32;
+                    log::info!(
+                        "D3D11: Y plane stats (first {} bytes): min={}, max={}, avg={}",
+                        sample_size,
+                        min_y,
+                        max_y,
+                        avg_y
+                    );
 
                     // Also sample middle of the frame
                     let mid_offset = p.y_plane.len() / 2;
@@ -2495,13 +2540,17 @@ impl Renderer {
                         let mid_min = mid_sample.iter().min().copied().unwrap_or(0);
                         let mid_max = mid_sample.iter().max().copied().unwrap_or(0);
                         let mid_avg: u32 = mid_sample.iter().map(|&x| x as u32).sum::<u32>() / 256;
-                        log::info!("D3D11: Y plane middle stats: min={}, max={}, avg={}",
-                            mid_min, mid_max, mid_avg);
+                        log::info!(
+                            "D3D11: Y plane middle stats: min={}, max={}, avg={}",
+                            mid_min,
+                            mid_max,
+                            mid_avg
+                        );
                     }
                 }
 
                 p
-            },
+            }
             Err(e) => {
                 log::warn!("Failed to lock D3D11 texture: {:?}", e);
                 return;
@@ -2510,8 +2559,13 @@ impl Renderer {
 
         // Check if we need to recreate textures (size change)
         let size_changed = self.video_size != (frame.width, frame.height);
-        log::info!("D3D11: size_changed={}, video_size={:?}, frame_size={}x{}",
-            size_changed, self.video_size, frame.width, frame.height);
+        log::info!(
+            "D3D11: size_changed={}, video_size={:?}, frame_size={}x{}",
+            size_changed,
+            self.video_size,
+            frame.width,
+            frame.height
+        );
 
         if size_changed {
             self.video_size = (frame.width, frame.height);
@@ -3430,7 +3484,10 @@ impl Renderer {
         // Extract state needed for UI rendering
         let app_state = app.state;
         // Use cached stats for display (throttled to 200ms updates)
-        let stats = self.cached_stats.clone().unwrap_or_else(|| app.stats.clone());
+        let stats = self
+            .cached_stats
+            .clone()
+            .unwrap_or_else(|| app.stats.clone());
         let show_stats = app.show_stats;
         let status_message = app.status_message.clone();
         let error_message = app.error_message.clone();
@@ -3459,7 +3516,12 @@ impl Renderer {
 
         // Resolution notification data (extracted for use in closure)
         let resolution_notif = self.resolution_notification.as_ref().map(|n| {
-            (n.old_resolution.clone(), n.new_resolution.clone(), n.direction, n.alpha())
+            (
+                n.old_resolution.clone(),
+                n.new_resolution.clone(),
+                n.direction,
+                n.alpha(),
+            )
         });
 
         // Queue times state
@@ -3511,118 +3573,122 @@ impl Renderer {
         {
             profile_scope!("egui_run");
             full_output = self.egui_ctx.run_ui(raw_input, |ctx| {
-            // Custom styling
-            let mut style = (*ctx.global_style()).clone();
-            style.visuals.window_fill = egui::Color32::from_rgb(20, 20, 30);
-            style.visuals.panel_fill = egui::Color32::from_rgb(25, 25, 35);
-            style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(35, 35, 50);
-            style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(45, 45, 65);
-            style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(60, 60, 90);
-            style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(80, 180, 80);
-            style.visuals.selection.bg_fill = egui::Color32::from_rgb(60, 120, 60);
-            ctx.set_global_style(style);
+                // Custom styling
+                let mut style = (*ctx.global_style()).clone();
+                style.visuals.window_fill = egui::Color32::from_rgb(20, 20, 30);
+                style.visuals.panel_fill = egui::Color32::from_rgb(25, 25, 35);
+                style.visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(35, 35, 50);
+                style.visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(45, 45, 65);
+                style.visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(60, 60, 90);
+                style.visuals.widgets.active.bg_fill = egui::Color32::from_rgb(80, 180, 80);
+                style.visuals.selection.bg_fill = egui::Color32::from_rgb(60, 120, 60);
+                ctx.set_global_style(style);
 
-            match app_state {
-                AppState::Login => {
-                    // Reduce idle CPU usage on login screen
-                    ctx.request_repaint_after(Duration::from_millis(100));
+                match app_state {
+                    AppState::Login => {
+                        // Reduce idle CPU usage on login screen
+                        ctx.request_repaint_after(Duration::from_millis(100));
 
-                    render_login_screen(
-                        ctx,
-                        &login_providers,
-                        selected_provider_index,
-                        &status_message,
-                        is_loading,
-                        &mut actions,
-                    );
-                }
-                AppState::Games => {
-                    // Update image cache for async loading
-                    image_cache::update_cache();
-
-                    // === UI Optimization: Reduce idle repaints ===
-                    // When in Games view with no user interaction, we only need to repaint
-                    // occasionally to check for newly loaded images. This reduces CPU from
-                    // 100% to ~5% when idle in the game library.
-                    // Note: User interactions (mouse, keyboard) will trigger immediate repaints
-                    // via the winit event system, so responsiveness is not affected.
-                    ctx.request_repaint_after(Duration::from_millis(100));
-
-                    self.render_games_screen(
-                        ctx,
-                        &games_list,
-                        &game_sections,
-                        &mut search_query,
-                        &status_message,
-                        show_settings,
-                        &settings,
-                        &runtime,
-                        &game_textures,
-                        &mut new_textures,
-                        current_tab,
-                        subscription.as_ref(),
-                        selected_game_popup.as_ref(),
-                        &servers,
-                        selected_server_index,
-                        auto_server_selection,
-                        ping_testing,
-                        show_settings_modal,
-                        app.show_session_conflict,
-                        app.show_av1_warning,
-                        app.show_alliance_warning,
-                        crate::auth::get_selected_provider()
-                            .login_provider_display_name
-                            .as_str(),
-                        &app.active_sessions,
-                        app.pending_game_launch.as_ref(),
-                        &mut queue_servers,
-                        queue_loading,
-                        queue_sort_mode,
-                        &queue_region_filter,
-                        show_server_selection,
-                        &selected_queue_server,
-                        pending_server_selection_game.as_ref(),
-                        &mut actions,
-                    );
-                }
-                AppState::Session => {
-                    // Session screen shows loading spinner, update at 30fps for smooth animation
-                    ctx.request_repaint_after(Duration::from_millis(33));
-
-                    render_session_screen(
-                        ctx,
-                        &selected_game,
-                        &status_message,
-                        &error_message,
-                        &mut actions,
-                    );
-                }
-                AppState::Streaming => {
-                    // Render stats overlay
-                    if show_stats && stats_visible {
-                        render_stats_panel(ctx, &stats, stats_position);
+                        render_login_screen(
+                            ctx,
+                            &login_providers,
+                            selected_provider_index,
+                            &status_message,
+                            is_loading,
+                            &mut actions,
+                        );
                     }
+                    AppState::Games => {
+                        // Update image cache for async loading
+                        image_cache::update_cache();
 
-                    // Render resolution change notification
-                    if let Some((old_res, new_res, direction, alpha)) = &resolution_notif {
-                        render_resolution_notification(ctx, old_res, new_res, *direction, *alpha);
+                        // === UI Optimization: Reduce idle repaints ===
+                        // When in Games view with no user interaction, we only need to repaint
+                        // occasionally to check for newly loaded images. This reduces CPU from
+                        // 100% to ~5% when idle in the game library.
+                        // Note: User interactions (mouse, keyboard) will trigger immediate repaints
+                        // via the winit event system, so responsiveness is not affected.
+                        ctx.request_repaint_after(Duration::from_millis(100));
+
+                        self.render_games_screen(
+                            ctx,
+                            &games_list,
+                            &game_sections,
+                            &mut search_query,
+                            &status_message,
+                            show_settings,
+                            &settings,
+                            &runtime,
+                            &game_textures,
+                            &mut new_textures,
+                            current_tab,
+                            subscription.as_ref(),
+                            selected_game_popup.as_ref(),
+                            &servers,
+                            selected_server_index,
+                            auto_server_selection,
+                            ping_testing,
+                            show_settings_modal,
+                            app.show_session_conflict,
+                            app.show_av1_warning,
+                            app.show_alliance_warning,
+                            crate::auth::get_selected_provider()
+                                .login_provider_display_name
+                                .as_str(),
+                            &app.active_sessions,
+                            app.pending_game_launch.as_ref(),
+                            &mut queue_servers,
+                            queue_loading,
+                            queue_sort_mode,
+                            &queue_region_filter,
+                            show_server_selection,
+                            &selected_queue_server,
+                            pending_server_selection_game.as_ref(),
+                            &mut actions,
+                        );
                     }
+                    AppState::Session => {
+                        // Session screen shows loading spinner, update at 30fps for smooth animation
+                        ctx.request_repaint_after(Duration::from_millis(33));
 
-                    // Small overlay hint
-                    egui::Area::new(egui::Id::new("stream_hint"))
-                        .anchor(egui::Align2::CENTER_TOP, [0.0, 10.0])
-                        .interactable(false)
-                        .show(ctx, |ui| {
-                            ui.label(
-                                egui::RichText::new(
-                                    "Ctrl+Shift+Q to stop • F3 stats • F11 fullscreen",
-                                )
-                                .color(egui::Color32::from_rgba_unmultiplied(255, 255, 255, 100))
-                                .size(12.0),
+                        render_session_screen(
+                            ctx,
+                            &selected_game,
+                            &status_message,
+                            &error_message,
+                            &mut actions,
+                        );
+                    }
+                    AppState::Streaming => {
+                        // Render stats overlay
+                        if show_stats && stats_visible {
+                            render_stats_panel(ctx, &stats, stats_position);
+                        }
+
+                        // Render resolution change notification
+                        if let Some((old_res, new_res, direction, alpha)) = &resolution_notif {
+                            render_resolution_notification(
+                                ctx, old_res, new_res, *direction, *alpha,
                             );
-                        });
+                        }
+
+                        // Small overlay hint
+                        egui::Area::new(egui::Id::new("stream_hint"))
+                            .anchor(egui::Align2::CENTER_TOP, [0.0, 10.0])
+                            .interactable(false)
+                            .show(ctx, |ui| {
+                                ui.label(
+                                    egui::RichText::new(
+                                        "Ctrl+Shift+Q to stop • F3 stats • F11 fullscreen",
+                                    )
+                                    .color(egui::Color32::from_rgba_unmultiplied(
+                                        255, 255, 255, 100,
+                                    ))
+                                    .size(12.0),
+                                );
+                            });
+                    }
                 }
-            }
             });
         } // end profile_scope!("egui_run")
 
@@ -3704,7 +3770,7 @@ impl Renderer {
         let repaint_delay = match app.state {
             AppState::Login | AppState::Games => Some(Duration::from_millis(100)),
             AppState::Session => Some(Duration::from_millis(33)), // 30fps for spinner
-            AppState::Streaming => None, // No delay when streaming
+            AppState::Streaming => None,                          // No delay when streaming
         };
 
         Ok((actions, repaint_delay))
@@ -6090,9 +6156,21 @@ fn render_resolution_notification(
 
     // Colors based on direction (using ASCII-compatible symbols)
     let (arrow, color, label) = match direction {
-        ResolutionDirection::Up => ("+", Color32::from_rgba_unmultiplied(100, 255, 100, alpha_u8), "Quality Increased"),
-        ResolutionDirection::Down => ("-", Color32::from_rgba_unmultiplied(255, 150, 100, alpha_u8), "Quality Decreased"),
-        ResolutionDirection::Same => ("=", Color32::from_rgba_unmultiplied(200, 200, 200, alpha_u8), "Quality Changed"),
+        ResolutionDirection::Up => (
+            "+",
+            Color32::from_rgba_unmultiplied(100, 255, 100, alpha_u8),
+            "Quality Increased",
+        ),
+        ResolutionDirection::Down => (
+            "-",
+            Color32::from_rgba_unmultiplied(255, 150, 100, alpha_u8),
+            "Quality Decreased",
+        ),
+        ResolutionDirection::Same => (
+            "=",
+            Color32::from_rgba_unmultiplied(200, 200, 200, alpha_u8),
+            "Quality Changed",
+        ),
     };
 
     // Slide-in animation: start 20px above, slide down to final position
@@ -6104,10 +6182,18 @@ fn render_resolution_notification(
         .order(egui::Order::Foreground)
         .show(ctx, |ui| {
             egui::Frame::new()
-                .fill(Color32::from_rgba_unmultiplied(20, 20, 25, (alpha * 230.0) as u8))
+                .fill(Color32::from_rgba_unmultiplied(
+                    20,
+                    20,
+                    25,
+                    (alpha * 230.0) as u8,
+                ))
                 .corner_radius(8.0)
                 .inner_margin(egui::Margin::symmetric(16, 12))
-                .stroke(egui::Stroke::new(1.0, Color32::from_rgba_unmultiplied(80, 80, 90, alpha_u8)))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    Color32::from_rgba_unmultiplied(80, 80, 90, alpha_u8),
+                ))
                 .show(ui, |ui| {
                     ui.vertical(|ui| {
                         ui.spacing_mut().item_spacing.y = 6.0;
@@ -6120,9 +6206,9 @@ fn render_resolution_notification(
                                     .color(color),
                             );
                             ui.label(
-                                RichText::new(label)
-                                    .font(FontId::proportional(14.0))
-                                    .color(Color32::from_rgba_unmultiplied(255, 255, 255, alpha_u8)),
+                                RichText::new(label).font(FontId::proportional(14.0)).color(
+                                    Color32::from_rgba_unmultiplied(255, 255, 255, alpha_u8),
+                                ),
                             );
                         });
 
@@ -6130,14 +6216,14 @@ fn render_resolution_notification(
                         ui.horizontal(|ui| {
                             // Old resolution (strikethrough effect with dim color)
                             ui.label(
-                                RichText::new(old_res)
-                                    .font(FontId::monospace(13.0))
-                                    .color(Color32::from_rgba_unmultiplied(150, 150, 150, alpha_u8)),
+                                RichText::new(old_res).font(FontId::monospace(13.0)).color(
+                                    Color32::from_rgba_unmultiplied(150, 150, 150, alpha_u8),
+                                ),
                             );
                             ui.label(
-                                RichText::new("->")
-                                    .font(FontId::monospace(13.0))
-                                    .color(Color32::from_rgba_unmultiplied(200, 200, 200, alpha_u8)),
+                                RichText::new("->").font(FontId::monospace(13.0)).color(
+                                    Color32::from_rgba_unmultiplied(200, 200, 200, alpha_u8),
+                                ),
                             );
                             // New resolution (bright)
                             ui.label(
