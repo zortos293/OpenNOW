@@ -1713,6 +1713,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "g29"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dcb2c86bc924b0adf8dd32db37e0b3cb57714adcad5c584c4fe9734ac8f5a1cd"
+dependencies = [
+ "hidapi",
+]
+
+[[package]]
 name = "generator"
 version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2167,6 +2176,19 @@ name = "hexf-parse"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+
+[[package]]
+name = "hidapi"
+version = "2.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "565dd4c730b8f8b2c0fb36df6be12e5470ae10895ddcc4e9dcfbfb495de202b0"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "pkg-config",
+ "windows-sys 0.48.0",
+]
 
 [[package]]
 name = "hkdf"
@@ -3575,6 +3597,7 @@ dependencies = [
  "ffmpeg-next",
  "foreign-types 0.5.0",
  "futures-util",
+ "g29",
  "gilrs",
  "gstreamer",
  "gstreamer-app",
@@ -3615,6 +3638,7 @@ dependencies = [
  "wgpu",
  "wgpu-hal",
  "windows 0.62.2",
+ "windows-numerics",
  "winit",
  "x11",
 ]

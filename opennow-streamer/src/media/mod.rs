@@ -330,6 +330,8 @@ pub struct StreamStats {
     pub is_hdr: bool,
     /// Color space (e.g., "BT.709", "BT.2020")
     pub color_space: String,
+    /// Number of racing wheels detected (0 = none)
+    pub wheel_count: usize,
 }
 
 impl StreamStats {

@@ -16,9 +16,11 @@ mod windows;
 
 pub mod controller;
 mod protocol;
+pub mod wheel;
 
-pub use controller::ControllerManager;
+pub use controller::{ControllerManager, RumbleEffect};
 pub use protocol::*;
+pub use wheel::{FfbEffectType, G29FfbManager, WheelManager};
 
 // Re-export raw input functions for Windows
 #[cfg(target_os = "windows")]

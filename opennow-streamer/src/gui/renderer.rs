@@ -131,6 +131,46 @@ impl ResolutionNotification {
     }
 }
 
+/// Racing wheel connection notification for animated popup
+/// Shows when a racing wheel is detected during a streaming session
+struct WheelNotification {
+    wheel_count: usize,
+    start_time: Instant,
+}
+
+impl WheelNotification {
+    const DURATION_SECS: f32 = 6.0;
+    const FADE_IN_SECS: f32 = 0.3;
+    const FADE_OUT_SECS: f32 = 0.8;
+
+    fn new(wheel_count: usize) -> Self {
+        Self {
+            wheel_count,
+            start_time: Instant::now(),
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.start_time.elapsed().as_secs_f32() > Self::DURATION_SECS
+    }
+
+    fn alpha(&self) -> f32 {
+        let elapsed = self.start_time.elapsed().as_secs_f32();
+
+        if elapsed < Self::FADE_IN_SECS {
+            // Fade in
+            elapsed / Self::FADE_IN_SECS
+        } else if elapsed > Self::DURATION_SECS - Self::FADE_OUT_SECS {
+            // Fade out
+            let fade_progress = (Self::DURATION_SECS - elapsed) / Self::FADE_OUT_SECS;
+            fade_progress.max(0.0)
+        } else {
+            // Full opacity
+            1.0
+        }
+    }
+}
+
 /// Main renderer
 pub struct Renderer {
     window: Arc<Window>,
@@ -210,6 +250,10 @@ pub struct Renderer {
     // Resolution change notification
     resolution_notification: Option<ResolutionNotification>,
     last_resolution: String,
+
+    // Racing wheel connection notification
+    wheel_notification: Option<WheelNotification>,
+    last_wheel_count: usize,
 
     // macOS zero-copy video rendering (Metal-based, no CPU copy)
     #[cfg(target_os = "macos")]
@@ -1003,6 +1047,9 @@ impl Renderer {
             // Resolution change notification
             resolution_notification: None,
             last_resolution: String::new(),
+            // Racing wheel connection notification
+            wheel_notification: None,
+            last_wheel_count: 0,
             #[cfg(target_os = "macos")]
             zero_copy_manager: ZeroCopyTextureManager::new(),
             #[cfg(target_os = "macos")]
@@ -1555,6 +1602,25 @@ impl Renderer {
     /// This allows the renderer to pull frames directly from the decoder
     pub fn set_shared_frame(&mut self, shared_frame: Arc<crate::app::SharedFrame>) {
         self.shared_frame = Some(shared_frame);
+    }
+
+    /// Show racing wheel connection notification
+    /// Called when racing wheels are detected during streaming session
+    pub fn show_wheel_notification(&mut self, wheel_count: usize) {
+        if wheel_count > 0 && wheel_count != self.last_wheel_count {
+            info!(
+                "Racing wheel notification: {} wheel(s) detected",
+                wheel_count
+            );
+            self.wheel_notification = Some(WheelNotification::new(wheel_count));
+            self.last_wheel_count = wheel_count;
+        }
+    }
+
+    /// Reset wheel notification state (call when streaming stops)
+    pub fn reset_wheel_notification(&mut self) {
+        self.wheel_notification = None;
+        self.last_wheel_count = 0;
     }
 
     /// Update video textures from frame (GPU YUV->RGB conversion)
@@ -3473,12 +3539,25 @@ impl Renderer {
                 }
                 self.last_resolution = app.stats.resolution.clone();
             }
+
+            // Detect racing wheel connection and show notification
+            if app.stats.wheel_count > 0 && app.stats.wheel_count != self.last_wheel_count {
+                self.show_wheel_notification(app.stats.wheel_count);
+            } else if app.stats.wheel_count == 0 && self.last_wheel_count > 0 {
+                // Wheels disconnected - reset state
+                self.last_wheel_count = 0;
+            }
         }
 
         // Clean up expired notifications
         if let Some(ref notif) = self.resolution_notification {
             if notif.is_expired() {
                 self.resolution_notification = None;
+            }
+        }
+        if let Some(ref notif) = self.wheel_notification {
+            if notif.is_expired() {
+                self.wheel_notification = None;
             }
         }
 
@@ -3526,6 +3605,12 @@ impl Renderer {
                 n.alpha(),
             )
         });
+
+        // Wheel notification data (extracted for use in closure)
+        let wheel_notif = self
+            .wheel_notification
+            .as_ref()
+            .map(|n| (n.wheel_count, n.alpha()));
 
         // Queue times state
         let mut queue_servers = app.queue_servers.clone();
@@ -3695,6 +3780,11 @@ impl Renderer {
                             render_resolution_notification(
                                 ctx, old_res, new_res, *direction, *alpha,
                             );
+                        }
+
+                        // Render racing wheel connection notification
+                        if let Some((wheel_count, alpha)) = wheel_notif {
+                            render_wheel_notification(ctx, wheel_count, alpha);
                         }
 
                         // Small overlay hint
@@ -6256,6 +6346,94 @@ fn render_resolution_notification(
                                     .font(FontId::monospace(13.0))
                                     .strong()
                                     .color(color),
+                            );
+                        });
+                    });
+                });
+        });
+
+    // Request repaint for smooth animation
+    ctx.request_repaint();
+}
+
+/// Render racing wheel connection notification popup (animated, center-top)
+/// Shows when a racing wheel is detected during streaming session
+fn render_wheel_notification(ctx: &egui::Context, wheel_count: usize, alpha: f32) {
+    use egui::{Align2, Color32, FontId, RichText};
+
+    // Calculate alpha for animation (0-255)
+    let alpha_u8 = (alpha * 255.0) as u8;
+
+    // Green color for wheel detection (positive feedback)
+    let accent_color = Color32::from_rgba_unmultiplied(100, 200, 100, alpha_u8);
+
+    // Slide-in animation: start 20px above, slide down to final position
+    let slide_offset = (1.0 - alpha.min(1.0)) * -20.0;
+
+    egui::Area::new(egui::Id::new("wheel_notification"))
+        .anchor(Align2::CENTER_TOP, [0.0, 100.0 + slide_offset]) // Below resolution notification
+        .interactable(false)
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            egui::Frame::new()
+                .fill(Color32::from_rgba_unmultiplied(
+                    20,
+                    30,
+                    25,
+                    (alpha * 230.0) as u8,
+                ))
+                .corner_radius(8.0)
+                .inner_margin(egui::Margin::symmetric(16, 12))
+                .stroke(egui::Stroke::new(
+                    1.0,
+                    Color32::from_rgba_unmultiplied(60, 100, 70, alpha_u8),
+                ))
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.spacing_mut().item_spacing.y = 6.0;
+
+                        // Title with steering wheel icon (using ASCII-compatible symbol)
+                        ui.horizontal(|ui| {
+                            // Use a circle/wheel-like character that's cross-platform compatible
+                            ui.label(
+                                RichText::new("(O)")
+                                    .font(FontId::monospace(16.0))
+                                    .color(accent_color),
+                            );
+                            ui.label(
+                                RichText::new("Racing Wheel Detected")
+                                    .font(FontId::proportional(14.0))
+                                    .strong()
+                                    .color(Color32::from_rgba_unmultiplied(
+                                        255, 255, 255, alpha_u8,
+                                    )),
+                            );
+                        });
+
+                        // Wheel count and info
+                        ui.horizontal(|ui| {
+                            let wheel_text = if wheel_count == 1 {
+                                "1 wheel connected".to_string()
+                            } else {
+                                format!("{} wheels connected", wheel_count)
+                            };
+                            ui.label(
+                                RichText::new(wheel_text)
+                                    .font(FontId::monospace(12.0))
+                                    .color(Color32::from_rgba_unmultiplied(
+                                        180, 180, 180, alpha_u8,
+                                    )),
+                            );
+                        });
+
+                        // Supported features hint
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new("Wheel, pedals, and shifter input active")
+                                    .font(FontId::proportional(11.0))
+                                    .color(Color32::from_rgba_unmultiplied(
+                                        140, 160, 140, alpha_u8,
+                                    )),
                             );
                         });
                     });

@@ -30,7 +30,7 @@ pub enum StreamingResult {
     /// Contains the stall duration in milliseconds before detection
     SsrcChangeDetected { stall_duration_ms: u64 },
 }
-use crate::input::{ControllerManager, InputHandler};
+use crate::input::{ControllerManager, FfbEffectType, G29FfbManager, InputHandler, WheelManager};
 use crate::media::{
     AudioDecoder, AudioPlayer, DepacketizerCodec, RtpDepacketizer, StreamStats, UnifiedVideoDecoder,
 };
@@ -412,11 +412,40 @@ pub async fn run_streaming(
 
     info!("Input handler connected to streaming loop");
 
-    // Initialize and start ControllerManager
+    // Initialize and start ControllerManager (gamepads via gilrs)
     let controller_manager = Arc::new(ControllerManager::new());
     controller_manager.set_event_sender(input_event_tx.clone());
     controller_manager.start();
     info!("Controller manager started");
+
+    // Initialize and start WheelManager (racing wheels via Windows.Gaming.Input)
+    // WheelManager detects dedicated racing wheels and provides proper axis separation
+    // (wheel rotation, throttle, brake, clutch, handbrake) mapped to gamepad format
+    let wheel_manager = Arc::new(WheelManager::new());
+    wheel_manager.set_event_sender(input_event_tx.clone());
+    wheel_manager.start();
+    if wheel_manager.has_wheels() {
+        info!("Racing wheel manager started - wheel input active");
+        // Initialize force feedback for detected wheels
+        for i in 0..wheel_manager.wheel_count() {
+            if wheel_manager.init_force_feedback(i) {
+                info!("Force feedback initialized for wheel {}", i);
+            }
+        }
+    } else {
+        info!("No racing wheels detected - wheels will be handled as gamepads via gilrs");
+    }
+
+    // Initialize G29 force feedback manager (HID-based, works in PS3 mode)
+    // This provides FFB support for Logitech G29 wheels that aren't detected by Windows.Gaming.Input
+    let g29_ffb = Arc::new(G29FfbManager::new());
+    let g29_connected = g29_ffb.init();
+    if g29_connected {
+        info!("G29 force feedback initialized via HID");
+    }
+
+    // Output decoder for force feedback / rumble messages from server
+    let mut output_decoder = OutputDecoder::new();
 
     // Channel for input task to send encoded packets to the WebRTC peer
     // This decouples input processing from video decoding completely
@@ -797,6 +826,60 @@ pub async fn run_streaming(
                     WebRtcEvent::DataChannelMessage(label, data) => {
                         debug!("Data channel '{}' message: {} bytes", label, data.len());
 
+                        // Try to decode as output event (force feedback / rumble)
+                        if let Some(output_event) = output_decoder.decode(&data) {
+                            match output_event {
+                                OutputEvent::Rumble {
+                                    controller_id,
+                                    left_motor,
+                                    right_motor,
+                                    duration_ms,
+                                } => {
+                                    debug!(
+                                        "Rumble event: controller={}, left={}, right={}, duration={}ms",
+                                        controller_id, left_motor, right_motor, duration_ms
+                                    );
+                                    // Queue rumble effect on the controller
+                                    controller_manager.queue_rumble(
+                                        controller_id,
+                                        left_motor,
+                                        right_motor,
+                                        duration_ms,
+                                    );
+                                }
+                                OutputEvent::ForceFeedback {
+                                    wheel_id,
+                                    effect_type,
+                                    magnitude,
+                                    duration_ms,
+                                    ..
+                                } => {
+                                    debug!(
+                                        "FFB event: wheel={}, type={}, magnitude={}, duration={}ms",
+                                        wheel_id, effect_type, magnitude, duration_ms
+                                    );
+                                    // Convert magnitude from i16 (-32768 to 32767) to f64 (-1.0 to 1.0)
+                                    let mag_normalized = magnitude as f64 / 32767.0;
+
+                                    // Try Windows.Gaming.Input first (for wheels that support it)
+                                    if wheel_manager.has_wheels() {
+                                        wheel_manager.apply_force_feedback(
+                                            wheel_id as usize,
+                                            FfbEffectType::from(effect_type),
+                                            mag_normalized,
+                                            duration_ms,
+                                        );
+                                    } else if g29_ffb.is_connected() {
+                                        // Fallback to G29 HID-based FFB
+                                        g29_ffb.apply_constant_force(mag_normalized);
+                                    }
+                                }
+                                OutputEvent::Unknown { .. } => {
+                                    // Should not happen - decoder only returns Rumble/ForceFeedback
+                                }
+                            }
+                        }
+
                         // Handle input handshake
                         if data.len() >= 2 {
                             let first_word = u16::from_le_bytes([data[0], data.get(1).copied().unwrap_or(0)]);
@@ -824,6 +907,9 @@ pub async fn run_streaming(
 
                                     // Update shared protocol version for input task
                                     input_protocol_version_shared.store(protocol_version as u8, std::sync::atomic::Ordering::Release);
+
+                                    // Update output decoder protocol version too
+                                    output_decoder.set_protocol_version(protocol_version as u8);
 
                                     // Signal input task that handshake is complete
                                     input_ready_flag.store(true, std::sync::atomic::Ordering::Release);
@@ -855,8 +941,10 @@ pub async fn run_streaming(
                             stall_duration_ms
                         );
 
-                        // Stop controller manager before returning
+                        // Stop input managers before returning
                         controller_manager.stop();
+                        wheel_manager.stop();
+                        g29_ffb.stop();
 
                         // Clear raw input sender
                         #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -965,6 +1053,9 @@ pub async fn run_streaming(
                     debug!("FPS below target: {:.1} / {} (dropped: {})", stats.fps, fps, frames_dropped);
                 }
 
+                // Update racing wheel count for UI notification
+                stats.wheel_count = wheel_manager.wheel_count();
+
                 // Reset counters
                 bytes_received = 0;
                 last_stats_time = now;
@@ -975,8 +1066,10 @@ pub async fn run_streaming(
         }
     }
 
-    // Stop controller manager
+    // Stop input managers
     controller_manager.stop();
+    wheel_manager.stop();
+    g29_ffb.stop();
 
     // Clean up raw input sender
     #[cfg(any(target_os = "windows", target_os = "macos"))]
