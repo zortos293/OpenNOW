@@ -129,7 +129,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::sync::mpsc;
 use winit::event::{ElementState, MouseButton};
 
-use crate::webrtc::{InputEncoder, InputEvent};
+use crate::webrtc::{InputEncoder, InputEvent, MAX_CLIPBOARD_PASTE_SIZE};
 
 /// Mouse event coalescing interval in microseconds
 /// Official client uses 4-16ms depending on browser, we use 2ms for lowest latency
@@ -656,6 +656,60 @@ impl InputHandler {
     pub fn encode_and_send(&self, event: &InputEvent) -> Vec<u8> {
         let mut encoder = self.encoder.lock();
         encoder.encode(event)
+    }
+
+    /// Handle clipboard paste (Ctrl+V)
+    /// Reads text from clipboard and sends it as key events
+    /// Returns the number of characters sent, or 0 if clipboard is empty/unavailable
+    pub fn handle_clipboard_paste(&self) -> usize {
+        // Try to read clipboard text
+        let clipboard_text = match arboard::Clipboard::new() {
+            Ok(mut clipboard) => match clipboard.get_text() {
+                Ok(text) => text,
+                Err(e) => {
+                    log::debug!("Failed to read clipboard: {:?}", e);
+                    return 0;
+                }
+            },
+            Err(e) => {
+                log::debug!("Failed to access clipboard: {:?}", e);
+                return 0;
+            }
+        };
+
+        if clipboard_text.is_empty() {
+            return 0;
+        }
+
+        // Truncate to max size (64KB like official GFN client)
+        let text = if clipboard_text.len() > MAX_CLIPBOARD_PASTE_SIZE {
+            log::warn!(
+                "Clipboard text truncated from {} to {} bytes",
+                clipboard_text.len(),
+                MAX_CLIPBOARD_PASTE_SIZE
+            );
+            &clipboard_text[..MAX_CLIPBOARD_PASTE_SIZE]
+        } else {
+            &clipboard_text
+        };
+
+        log::info!("Pasting {} characters from clipboard", text.chars().count());
+
+        let char_count = text.chars().count();
+
+        // Send ClipboardPaste event - it will be expanded into key events in the WebRTC layer
+        self.send_event(InputEvent::ClipboardPaste {
+            text: text.to_string(),
+        });
+
+        char_count
+    }
+
+    /// Check if a key event is Ctrl+V (paste shortcut)
+    /// Returns true if the key should trigger clipboard paste
+    pub fn is_paste_shortcut(keycode: u16, modifiers: u16) -> bool {
+        // VK_V = 0x56, Ctrl modifier = 0x02
+        keycode == 0x56 && (modifiers & 0x02) != 0
     }
 }
 

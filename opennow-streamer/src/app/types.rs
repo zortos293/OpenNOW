@@ -294,6 +294,7 @@ pub enum SettingChange {
     DecoderBackend(VideoDecoderBackend),
     ColorQuality(ColorQuality),
     Hdr(bool),
+    ClipboardPasteEnabled(bool),
 }
 
 /// Application state enum

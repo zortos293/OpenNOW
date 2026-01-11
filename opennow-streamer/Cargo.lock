@@ -3577,6 +3577,7 @@ name = "opennow-streamer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arboard",
  "ash",
  "ash-window",
  "base64 0.22.1",

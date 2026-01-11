@@ -481,6 +481,25 @@ pub async fn run_streaming(
                         input_protocol_version_clone.load(std::sync::atomic::Ordering::Relaxed);
                     input_encoder.set_protocol_version(version);
 
+                    // Handle ClipboardPaste specially - expand into multiple key events
+                    if let InputEvent::ClipboardPaste { ref text } = event {
+                        info!("Processing clipboard paste: {} chars", text.chars().count());
+                        let packets = datachannel::encode_clipboard_paste(&mut input_encoder, text);
+                        for encoded in packets {
+                            // Send each key event packet
+                            // Clipboard paste uses keyboard channel (reliable)
+                            if input_packet_tx_clone
+                                .try_send((encoded, false, false, 0))
+                                .is_err()
+                            {
+                                warn!("Input channel full during clipboard paste");
+                            }
+                            // Small delay between packets to avoid overwhelming the server
+                            // This is handled by timestamps in the packets themselves
+                        }
+                        continue; // Don't process as normal event
+                    }
+
                     // Extract event timestamp for latency calculation
                     let event_timestamp_us = match &event {
                         InputEvent::KeyDown { timestamp_us, .. }
@@ -490,7 +509,7 @@ pub async fn run_streaming(
                         | InputEvent::MouseButtonUp { timestamp_us, .. }
                         | InputEvent::MouseWheel { timestamp_us, .. }
                         | InputEvent::Gamepad { timestamp_us, .. } => *timestamp_us,
-                        InputEvent::Heartbeat => 0,
+                        InputEvent::Heartbeat | InputEvent::ClipboardPaste { .. } => 0,
                     };
 
                     // Calculate input latency (time from event creation to now)

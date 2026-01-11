@@ -59,6 +59,10 @@ pub struct Settings {
     /// Use raw input (Windows only)
     pub raw_input: bool,
 
+    /// Enable clipboard paste (Ctrl+V sends clipboard text to remote session)
+    /// Max 65536 bytes (64KB) per paste
+    pub clipboard_paste_enabled: bool,
+
     // === Display ===
     /// Start in fullscreen
     pub fullscreen: bool,
@@ -120,6 +124,7 @@ impl Default for Settings {
             // Input
             mouse_sensitivity: 1.0,
             raw_input: true,
+            clipboard_paste_enabled: true, // Enable by default like official client
 
             // Display
             fullscreen: false,

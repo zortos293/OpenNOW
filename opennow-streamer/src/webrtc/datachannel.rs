@@ -28,6 +28,9 @@ pub const MOUSE_BUTTON_LEFT: u8 = 0;
 pub const MOUSE_BUTTON_RIGHT: u8 = 1;
 pub const MOUSE_BUTTON_MIDDLE: u8 = 2;
 
+/// Maximum clipboard paste buffer size (64KB, matches official GFN client)
+pub const MAX_CLIPBOARD_PASTE_SIZE: usize = 65536;
+
 /// Input events that can be sent to the server
 /// Each event carries its own timestamp_us (microseconds since app start)
 /// for accurate timing even when events are queued.
@@ -70,6 +73,10 @@ pub enum InputEvent {
         flags: u16,
         timestamp_us: u64,
     },
+    /// Clipboard paste - text to be typed into the remote session
+    /// The text is sent character by character as keyboard input
+    /// (matches official GFN client behavior with clipboardHintStringType: "keyboard")
+    ClipboardPaste { text: String },
 }
 
 /// Encoder for GFN input protocol
@@ -190,6 +197,12 @@ impl InputEncoder {
                 self.buffer.put_u32_le(INPUT_HEARTBEAT);
             }
 
+            InputEvent::ClipboardPaste { .. } => {
+                // ClipboardPaste is handled specially - it expands to multiple key events
+                // This should not be called directly; use encode_clipboard_paste() instead
+                // Return empty buffer as fallback
+            }
+
             InputEvent::Gamepad {
                 controller_id,
                 button_flags,
@@ -270,6 +283,126 @@ impl Default for InputEncoder {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Convert a character to Windows Virtual Key code and shift state
+/// Returns (vk_code, needs_shift)
+pub fn char_to_vk(c: char) -> Option<(u16, bool)> {
+    match c {
+        // Lowercase letters -> VK_A to VK_Z (0x41-0x5A)
+        'a'..='z' => Some((c.to_ascii_uppercase() as u16, false)),
+        // Uppercase letters -> VK_A to VK_Z with shift
+        'A'..='Z' => Some((c as u16, true)),
+        // Numbers -> VK_0 to VK_9 (0x30-0x39)
+        '0'..='9' => Some((c as u16, false)),
+        // Shifted number symbols
+        '!' => Some((0x31, true)), // Shift+1
+        '@' => Some((0x32, true)), // Shift+2
+        '#' => Some((0x33, true)), // Shift+3
+        '$' => Some((0x34, true)), // Shift+4
+        '%' => Some((0x35, true)), // Shift+5
+        '^' => Some((0x36, true)), // Shift+6
+        '&' => Some((0x37, true)), // Shift+7
+        '*' => Some((0x38, true)), // Shift+8
+        '(' => Some((0x39, true)), // Shift+9
+        ')' => Some((0x30, true)), // Shift+0
+        // Common punctuation
+        ' ' => Some((0x20, false)),  // VK_SPACE
+        '\t' => Some((0x09, false)), // VK_TAB
+        '\n' => None, // Skip newline (Enter) - could trigger unwanted form submissions
+        '\r' => None, // Skip carriage return
+        // OEM keys (US keyboard layout)
+        '-' => Some((0xBD, false)),  // VK_OEM_MINUS
+        '_' => Some((0xBD, true)),   // Shift+minus
+        '=' => Some((0xBB, false)),  // VK_OEM_PLUS (equals key)
+        '+' => Some((0xBB, true)),   // Shift+equals
+        '[' => Some((0xDB, false)),  // VK_OEM_4
+        '{' => Some((0xDB, true)),   // Shift+[
+        ']' => Some((0xDD, false)),  // VK_OEM_6
+        '}' => Some((0xDD, true)),   // Shift+]
+        '\\' => Some((0xDC, false)), // VK_OEM_5
+        '|' => Some((0xDC, true)),   // Shift+backslash
+        ';' => Some((0xBA, false)),  // VK_OEM_1
+        ':' => Some((0xBA, true)),   // Shift+semicolon
+        '\'' => Some((0xDE, false)), // VK_OEM_7
+        '"' => Some((0xDE, true)),   // Shift+quote
+        ',' => Some((0xBC, false)),  // VK_OEM_COMMA
+        '<' => Some((0xBC, true)),   // Shift+comma
+        '.' => Some((0xBE, false)),  // VK_OEM_PERIOD
+        '>' => Some((0xBE, true)),   // Shift+period
+        '/' => Some((0xBF, false)),  // VK_OEM_2
+        '?' => Some((0xBF, true)),   // Shift+slash
+        '`' => Some((0xC0, false)),  // VK_OEM_3
+        '~' => Some((0xC0, true)),   // Shift+backtick
+        _ => None,                   // Unsupported character
+    }
+}
+
+/// Generate key events for clipboard paste text
+/// Returns a vector of encoded key event packets ready to send
+pub fn encode_clipboard_paste(encoder: &mut InputEncoder, text: &str) -> Vec<Vec<u8>> {
+    let mut packets = Vec::new();
+    let base_timestamp = encoder.timestamp_us();
+    let mut time_offset: u64 = 0;
+
+    // VK_SHIFT = 0x10
+    const VK_SHIFT: u16 = 0x10;
+
+    for c in text.chars() {
+        if let Some((vk_code, needs_shift)) = char_to_vk(c) {
+            let timestamp = base_timestamp + time_offset;
+
+            // Press shift if needed
+            if needs_shift {
+                let shift_down = InputEvent::KeyDown {
+                    keycode: VK_SHIFT,
+                    scancode: 0,
+                    modifiers: 0x01, // Shift modifier
+                    timestamp_us: timestamp,
+                };
+                packets.push(encoder.encode(&shift_down));
+                time_offset += 1; // 1 microsecond between events
+            }
+
+            // Key down
+            let key_down = InputEvent::KeyDown {
+                keycode: vk_code,
+                scancode: 0,
+                modifiers: if needs_shift { 0x01 } else { 0 },
+                timestamp_us: base_timestamp + time_offset,
+            };
+            packets.push(encoder.encode(&key_down));
+            time_offset += 1;
+
+            // Key up
+            let key_up = InputEvent::KeyUp {
+                keycode: vk_code,
+                scancode: 0,
+                modifiers: if needs_shift { 0x01 } else { 0 },
+                timestamp_us: base_timestamp + time_offset,
+            };
+            packets.push(encoder.encode(&key_up));
+            time_offset += 1;
+
+            // Release shift if it was pressed
+            if needs_shift {
+                let shift_up = InputEvent::KeyUp {
+                    keycode: VK_SHIFT,
+                    scancode: 0,
+                    modifiers: 0,
+                    timestamp_us: base_timestamp + time_offset,
+                };
+                packets.push(encoder.encode(&shift_up));
+                time_offset += 1;
+            }
+
+            // Small delay between characters (10 microseconds)
+            time_offset += 10;
+        }
+        // Skip unsupported characters silently
+    }
+
+    packets
 }
 
 /// Output events received from the server (force feedback / haptics)

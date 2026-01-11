@@ -361,6 +361,27 @@ impl ApplicationHandler for OpenNowApp {
                     }
                 }
             }
+            // Ctrl+V to paste clipboard text into remote session
+            WindowEvent::KeyboardInput {
+                event:
+                    KeyEvent {
+                        physical_key: PhysicalKey::Code(KeyCode::KeyV),
+                        state: ElementState::Pressed,
+                        ..
+                    },
+                ..
+            } if self.modifiers.state().control_key() && !self.modifiers.state().shift_key() => {
+                let app = self.app.lock();
+                if app.state == AppState::Streaming && app.settings.clipboard_paste_enabled {
+                    if let Some(ref input_handler) = app.input_handler {
+                        info!("Ctrl+V pressed - pasting clipboard to remote session");
+                        let char_count = input_handler.handle_clipboard_paste();
+                        if char_count > 0 {
+                            info!("Pasted {} characters to remote session", char_count);
+                        }
+                    }
+                }
+            }
             WindowEvent::ModifiersChanged(new_modifiers) => {
                 self.modifiers = new_modifiers;
             }

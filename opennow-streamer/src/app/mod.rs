@@ -479,6 +479,9 @@ impl App {
                             }
                         }
                     }
+                    SettingChange::ClipboardPasteEnabled(enabled) => {
+                        self.settings.clipboard_paste_enabled = enabled;
+                    }
                 }
                 self.save_settings();
             }

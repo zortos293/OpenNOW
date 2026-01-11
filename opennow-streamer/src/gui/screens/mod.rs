@@ -357,6 +357,30 @@ pub fn render_settings_modal(
                         }
                     });
 
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(8.0);
+
+                // === Input Settings Section ===
+                ui.heading(egui::RichText::new("Input").color(egui::Color32::from_rgb(118, 185, 0)));
+                ui.add_space(8.0);
+
+                egui::Grid::new("input_settings_grid")
+                    .num_columns(2)
+                    .spacing([24.0, 16.0])
+                    .show(ui, |ui| {
+                        // Clipboard Paste
+                        ui.label("Clipboard Paste")
+                            .on_hover_text("Enable Ctrl+V to paste clipboard text into the remote session.\nText is typed character-by-character (max 64KB).\nUseful for pasting passwords, URLs, or codes.");
+                        ui.horizontal(|ui| {
+                            let mut clipboard_enabled = settings.clipboard_paste_enabled;
+                            if ui.checkbox(&mut clipboard_enabled, "Enable clipboard paste (Ctrl+V)").changed() {
+                                actions.push(UiAction::UpdateSetting(SettingChange::ClipboardPasteEnabled(clipboard_enabled)));
+                            }
+                        });
+                        ui.end_row();
+                    });
+
                 ui.add_space(24.0);
 
                 // Buttons row
