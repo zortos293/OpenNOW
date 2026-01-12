@@ -152,6 +152,7 @@ pub enum GamesTab {
     AllGames,   // Flat grid view
     MyLibrary,  // User's library
     QueueTimes, // Queue times for games (hidden, for free tier users)
+    ZNow,       // ZNow portable apps launcher
 }
 
 impl Default for GamesTab {
@@ -279,6 +280,32 @@ pub enum UiAction {
     RefreshQueueTimes,
     /// Update window size (width, height) - saved to settings
     UpdateWindowSize(u32, u32),
+    // ZNow actions
+    /// Refresh ZNow apps list
+    RefreshZNowApps,
+    /// Select a ZNow app to install/launch
+    SelectZNowApp(ZNowApp),
+    /// Launch ZNow session (start GFN with placeholder game)
+    LaunchZNowSession(ZNowApp),
+    /// Install app via ZNow
+    ZNowInstallApp(String),
+    /// Launch app via ZNow
+    ZNowLaunchApp(String),
+    /// Connect to ZNow relay server
+    ZNowConnect,
+    /// Disconnect from ZNow relay
+    ZNowDisconnect,
+    /// ZNow pairing complete (QR detected)
+    ZNowPaired(String),
+    /// ZNow status update from relay
+    ZNowStatusUpdate(ZNowConnectionState),
+    // File transfer actions
+    /// File dropped on window (path)
+    FileDropped(std::path::PathBuf),
+    /// Cancel a file transfer
+    CancelFileTransfer(String),
+    /// Dismiss completed/failed transfer notification
+    DismissFileTransfer(String),
 }
 
 /// Setting changes
@@ -308,4 +335,156 @@ pub enum AppState {
     Session,
     /// Active streaming
     Streaming,
+}
+
+// ============================================================================
+// ZNow Types
+// ============================================================================
+
+/// ZNow portable app information
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ZNowApp {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    #[serde(rename = "iconUrl")]
+    pub icon_url: String,
+    pub category: String,
+    #[serde(rename = "gameId")]
+    pub game_id: String, // GFN game ID to launch
+    #[serde(rename = "portableAppUrl")]
+    pub portable_app_url: String,
+    #[serde(rename = "exePath", default)]
+    pub exe_path: String,
+    pub version: String,
+    #[serde(default)]
+    pub size: Option<String>,
+}
+
+/// ZNow connection state
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ZNowConnectionState {
+    /// Not connected to relay server
+    Disconnected,
+    /// Connecting to relay server
+    Connecting,
+    /// Connected to relay, waiting for GFN session to start
+    WaitingForSession,
+    /// GFN session started, scanning for QR code
+    WaitingForQR,
+    /// QR code detected, pairing with znow-runner
+    Pairing,
+    /// Paired and ready to send commands
+    Connected,
+    /// Installing an app
+    Installing { app_name: String, progress: u8 },
+    /// Launching an app
+    Launching { app_name: String },
+    /// App is running
+    Running { app_name: String },
+    /// Error occurred
+    Error(String),
+}
+
+impl Default for ZNowConnectionState {
+    fn default() -> Self {
+        ZNowConnectionState::Disconnected
+    }
+}
+
+/// ZNow session information
+#[derive(Debug, Clone, Default)]
+pub struct ZNowSession {
+    pub client_code: Option<String>,
+    pub exe_code: Option<String>,
+    pub state: ZNowConnectionState,
+    pub selected_app: Option<ZNowApp>,
+}
+
+// ============================================================================
+// File Transfer Types
+// ============================================================================
+
+/// File transfer state for drag & drop uploads
+#[derive(Debug, Clone)]
+pub struct FileTransfer {
+    /// Unique transfer ID
+    pub id: String,
+    /// Original file name
+    pub file_name: String,
+    /// Total file size in bytes
+    pub total_bytes: u64,
+    /// Bytes transferred so far
+    pub transferred_bytes: u64,
+    /// Transfer state
+    pub state: FileTransferState,
+    /// Transfer speed in bytes per second
+    pub speed_bps: u64,
+    /// Start time for speed calculation
+    pub start_time: std::time::Instant,
+}
+
+impl FileTransfer {
+    pub fn new(id: String, file_name: String, total_bytes: u64) -> Self {
+        Self {
+            id,
+            file_name,
+            total_bytes,
+            transferred_bytes: 0,
+            state: FileTransferState::Pending,
+            speed_bps: 0,
+            start_time: std::time::Instant::now(),
+        }
+    }
+
+    /// Get progress as percentage (0-100)
+    pub fn progress_percent(&self) -> u8 {
+        if self.total_bytes == 0 {
+            return 100;
+        }
+        ((self.transferred_bytes as f64 / self.total_bytes as f64) * 100.0) as u8
+    }
+
+    /// Get formatted speed string (e.g., "5.2 MB/s")
+    pub fn speed_string(&self) -> String {
+        let mb_per_sec = self.speed_bps as f64 / (1024.0 * 1024.0);
+        if mb_per_sec >= 1.0 {
+            format!("{:.1} MB/s", mb_per_sec)
+        } else {
+            let kb_per_sec = self.speed_bps as f64 / 1024.0;
+            format!("{:.0} KB/s", kb_per_sec)
+        }
+    }
+
+    /// Get formatted file size
+    pub fn size_string(&self) -> String {
+        format_bytes(self.total_bytes)
+    }
+}
+
+/// File transfer state
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FileTransferState {
+    /// Waiting to start
+    Pending,
+    /// Currently uploading
+    Uploading,
+    /// Upload complete
+    Complete,
+    /// Upload failed
+    Failed(String),
+}
+
+/// Format bytes to human readable string
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 * 1024 {
+        format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+    } else if bytes >= 1024 * 1024 {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{} B", bytes)
+    }
 }

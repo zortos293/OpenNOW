@@ -772,3 +772,89 @@ pub fn mark_welcome_shown() {
         }
     }
 }
+
+// ============================================================================
+// ZNow Cache
+// ============================================================================
+
+use super::types::ZNowApp;
+
+fn znow_apps_path() -> Option<PathBuf> {
+    get_app_data_dir().map(|p| p.join("znow_apps_cache.json"))
+}
+
+/// Save ZNow apps to cache
+pub fn save_znow_apps_cache(apps: &[ZNowApp]) {
+    if let Some(path) = znow_apps_path() {
+        match serde_json::to_string_pretty(apps) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    warn!("Failed to save ZNow apps cache: {}", e);
+                }
+            }
+            Err(e) => {
+                warn!("Failed to serialize ZNow apps: {}", e);
+            }
+        }
+    }
+}
+
+/// Load ZNow apps from cache
+pub fn load_znow_apps_cache() -> Option<Vec<ZNowApp>> {
+    let path = znow_apps_path()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+/// Clear ZNow apps cache
+pub fn clear_znow_apps_cache() {
+    if let Some(path) = znow_apps_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+// ============================================================
+// ZNow Relay Sender Cache (in-memory, not file-based)
+// ============================================================
+
+use parking_lot::RwLock;
+use tokio::sync::mpsc;
+use crate::znow::relay::{OutgoingMessage, RelayEvent};
+
+/// Global storage for the relay command sender
+/// This is set by the async connect task and read by the main thread
+static ZNOW_RELAY_TX: RwLock<Option<mpsc::Sender<OutgoingMessage>>> = RwLock::new(None);
+
+/// Global storage for relay events (main thread polls these)
+static ZNOW_RELAY_EVENTS: RwLock<Vec<RelayEvent>> = RwLock::new(Vec::new());
+
+/// Store the relay sender for later use
+pub fn set_znow_relay_sender(sender: mpsc::Sender<OutgoingMessage>) {
+    *ZNOW_RELAY_TX.write() = Some(sender);
+    info!("ZNow relay sender stored");
+}
+
+/// Take the relay sender (moves it out of the cache)
+pub fn take_znow_relay_sender() -> Option<mpsc::Sender<OutgoingMessage>> {
+    ZNOW_RELAY_TX.write().take()
+}
+
+/// Check if we have a relay sender cached
+pub fn has_znow_relay_sender() -> bool {
+    ZNOW_RELAY_TX.read().is_some()
+}
+
+/// Clear the relay sender
+pub fn clear_znow_relay_sender() {
+    *ZNOW_RELAY_TX.write() = None;
+}
+
+/// Push a relay event to be processed by the main thread
+pub fn push_znow_relay_event(event: RelayEvent) {
+    ZNOW_RELAY_EVENTS.write().push(event);
+}
+
+/// Take all pending relay events
+pub fn take_znow_relay_events() -> Vec<RelayEvent> {
+    std::mem::take(&mut *ZNOW_RELAY_EVENTS.write())
+}

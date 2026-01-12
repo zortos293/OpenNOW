@@ -13,6 +13,7 @@ mod media;
 mod profiling;
 mod utils;
 mod webrtc;
+mod znow;
 
 // Re-export profiling functions for use throughout the codebase
 #[allow(unused_imports)]
@@ -555,6 +556,28 @@ impl ApplicationHandler for OpenNowApp {
                     if let Some(ref input_handler) = app.input_handler {
                         input_handler.handle_cursor_move(position.x, position.y);
                     }
+                }
+            }
+            // Drag & drop file transfer
+            WindowEvent::DroppedFile(path) => {
+                let app_state = {
+                    let app = self.app.lock();
+                    app.state
+                };
+                // Only accept file drops during streaming (when connected to GFN session)
+                if app_state == AppState::Streaming {
+                    info!("File dropped: {:?}", path);
+                    let mut app = self.app.lock();
+                    app.handle_action(UiAction::FileDropped(path));
+                }
+            }
+            WindowEvent::HoveredFile(path) => {
+                let app_state = {
+                    let app = self.app.lock();
+                    app.state
+                };
+                if app_state == AppState::Streaming {
+                    debug!("File hovering: {:?}", path);
                 }
             }
             _ => {}

@@ -3637,6 +3637,13 @@ impl Renderer {
         let ads_remaining_secs = app.ads_remaining_secs;
         let ads_total_secs = app.ads_total_secs;
 
+        // ZNow state
+        let znow_apps = app.filtered_znow_apps().into_iter().cloned().collect::<Vec<_>>();
+        let znow_loading = app.znow_loading;
+
+        // File transfers (for drag & drop upload notifications)
+        let file_transfers = app.file_transfers.clone();
+
         // Get games based on current tab
         // Optimization: Home tab uses game_sections, not games_list - avoid cloning games
         let games_list: Vec<(usize, crate::app::GameInfo)> = match current_tab {
@@ -3660,6 +3667,7 @@ impl Renderer {
                     .collect()
             }
             GamesTab::QueueTimes => Vec::new(),
+            GamesTab::ZNow => Vec::new(), // ZNow tab uses its own app list
         };
 
         // Get game sections for Home tab - only clone if on Home tab
@@ -3754,6 +3762,9 @@ impl Renderer {
                             show_server_selection,
                             &selected_queue_server,
                             pending_server_selection_game.as_ref(),
+                            &znow_state,
+                            &znow_apps,
+                            znow_loading,
                             &mut actions,
                         );
                     }
@@ -3796,6 +3807,11 @@ impl Renderer {
                         // Render racing wheel connection notification
                         if let Some((wheel_count, alpha)) = wheel_notif {
                             render_wheel_notification(ctx, wheel_count, alpha);
+                        }
+
+                        // Render file transfer notifications
+                        if !file_transfers.is_empty() {
+                            render_file_transfer_notifications(ctx, &file_transfers, &mut actions);
                         }
 
                         // Small overlay hint
@@ -3942,6 +3958,9 @@ impl Renderer {
         show_server_selection: bool,
         selected_queue_server: &Option<String>,
         pending_server_selection_game: Option<&GameInfo>,
+        znow_state: &crate::app::ZNowConnectionState,
+        znow_apps: &[crate::app::ZNowApp],
+        znow_loading: bool,
         actions: &mut Vec<UiAction>,
     ) {
         // Top bar with tabs, search, and logout - subscription info moved to bottom
@@ -4055,6 +4074,32 @@ impl Renderer {
                         && !queue_times_selected
                     {
                         actions.push(UiAction::SwitchTab(GamesTab::QueueTimes));
+                    }
+
+                    ui.add_space(8.0);
+
+                    // ZNow tab button
+                    let znow_selected = current_tab == GamesTab::ZNow;
+                    let znow_btn = egui::Button::new(
+                        egui::RichText::new("ZNow")
+                            .size(13.0)
+                            .color(egui::Color32::WHITE)
+                            .strong(),
+                    )
+                    .fill(if znow_selected {
+                        egui::Color32::from_rgb(118, 185, 0)
+                    } else {
+                        egui::Color32::from_rgb(50, 50, 65)
+                    })
+                    .corner_radius(6.0);
+
+                    if ui
+                        .add_sized([80.0, 32.0], znow_btn)
+                        .on_hover_text("Launch portable apps in GFN")
+                        .clicked()
+                        && !znow_selected
+                    {
+                        actions.push(UiAction::SwitchTab(GamesTab::ZNow));
                     }
 
                     ui.add_space(20.0);
@@ -5033,6 +5078,165 @@ impl Renderer {
                                 if remaining_rows > 0 {
                                     ui.allocate_space(egui::vec2(available_width, remaining_rows as f32 * row_height));
                                 }
+                            });
+                    }
+                }
+                GamesTab::ZNow => {
+                    // ZNow portable apps tab
+                    ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        ui.label(
+                            egui::RichText::new("ZNow - Portable Apps")
+                                .size(20.0)
+                                .strong()
+                                .color(egui::Color32::WHITE)
+                        );
+                    });
+
+                    ui.add_space(15.0);
+
+                    // Refresh button
+                    ui.horizontal(|ui| {
+                        ui.add_space(10.0);
+                        let refresh_btn = egui::Button::new(
+                            egui::RichText::new("Refresh Apps")
+                                .size(13.0)
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(egui::Color32::from_rgb(50, 50, 65))
+                        .corner_radius(6.0);
+
+                        if ui.add_sized([120.0, 32.0], refresh_btn).clicked() {
+                            actions.push(UiAction::RefreshZNowApps);
+                        }
+                    });
+
+                    ui.add_space(20.0);
+
+                    // Apps grid (znow_apps extracted at function start)
+                    if znow_apps.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(100.0);
+                            if znow_loading {
+                                ui.label(
+                                    egui::RichText::new("Loading apps...")
+                                        .size(14.0)
+                                        .color(egui::Color32::from_rgb(120, 120, 120))
+                                );
+                            } else {
+                                ui.label(
+                                    egui::RichText::new("No apps available.\nClick 'Refresh Apps' to load the catalog.")
+                                        .size(14.0)
+                                        .color(egui::Color32::from_rgb(120, 120, 120))
+                                );
+                            }
+                        });
+                    } else {
+                        egui::ScrollArea::vertical()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                let available_width = ui.available_width() - 20.0; // padding
+                                let card_width = 180.0;
+                                let card_height = 160.0;
+                                let spacing = 16.0;
+                                let num_columns = ((available_width + spacing) / (card_width + spacing)).floor() as usize;
+                                let num_columns = num_columns.max(2).min(6);
+
+                                ui.add_space(10.0);
+
+                                // Use Grid for proper alignment
+                                egui::Grid::new("znow_apps_grid")
+                                    .num_columns(num_columns)
+                                    .spacing([spacing, spacing])
+                                    .min_col_width(card_width)
+                                    .show(ui, |ui| {
+                                        for (idx, app_item) in znow_apps.iter().enumerate() {
+                                            // App card with fixed height
+                                            egui::Frame::new()
+                                                .fill(egui::Color32::from_rgb(35, 35, 50))
+                                                .corner_radius(8.0)
+                                                .inner_margin(egui::Margin::same(12))
+                                                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(60, 60, 75)))
+                                                .show(ui, |ui| {
+                                                    ui.set_width(card_width - 24.0);
+                                                    ui.set_height(card_height - 24.0);
+
+                                                    ui.vertical(|ui| {
+                                                        // Icon and name row
+                                                        ui.horizontal(|ui| {
+                                                            // App icon placeholder
+                                                            let icon_size = egui::vec2(48.0, 48.0);
+                                                            let (_, rect) = ui.allocate_space(icon_size);
+                                                            ui.painter().rect_filled(
+                                                                rect,
+                                                                8.0,
+                                                                egui::Color32::from_rgb(70, 70, 90),
+                                                            );
+                                                            let initial = app_item.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                                                            ui.painter().text(
+                                                                rect.center(),
+                                                                egui::Align2::CENTER_CENTER,
+                                                                &initial,
+                                                                egui::FontId::proportional(20.0),
+                                                                egui::Color32::WHITE,
+                                                            );
+
+                                                            ui.add_space(8.0);
+
+                                                            ui.vertical(|ui| {
+                                                                // App name
+                                                                ui.label(
+                                                                    egui::RichText::new(&app_item.name)
+                                                                        .size(13.0)
+                                                                        .strong()
+                                                                        .color(egui::Color32::WHITE)
+                                                                );
+                                                                // Category
+                                                                ui.label(
+                                                                    egui::RichText::new(&app_item.category)
+                                                                        .size(10.0)
+                                                                        .color(egui::Color32::from_rgb(120, 120, 140))
+                                                                );
+                                                            });
+                                                        });
+
+                                                        ui.add_space(8.0);
+
+                                                        // Description (truncated)
+                                                        let desc = if app_item.description.len() > 50 {
+                                                            format!("{}...", &app_item.description[..47])
+                                                        } else {
+                                                            app_item.description.clone()
+                                                        };
+                                                        ui.label(
+                                                            egui::RichText::new(desc)
+                                                                .size(10.0)
+                                                                .color(egui::Color32::from_rgb(150, 150, 160))
+                                                        );
+
+                                                        ui.with_layout(egui::Layout::bottom_up(egui::Align::Center), |ui| {
+                                                            // Launch button at bottom
+                                                            let launch_btn = egui::Button::new(
+                                                                egui::RichText::new("Launch")
+                                                                    .size(12.0)
+                                                                    .color(egui::Color32::WHITE),
+                                                            )
+                                                            .fill(egui::Color32::from_rgb(118, 185, 0))
+                                                            .corner_radius(4.0);
+
+                                                            if ui.add_sized([card_width - 48.0, 26.0], launch_btn).clicked() {
+                                                                actions.push(UiAction::LaunchZNowSession(app_item.clone()));
+                                                            }
+                                                        });
+                                                    });
+                                                });
+
+                                            // New row after num_columns items
+                                            if (idx + 1) % num_columns == 0 {
+                                                ui.end_row();
+                                            }
+                                        }
+                                    });
                             });
                     }
                 }
@@ -6458,4 +6662,183 @@ fn render_wheel_notification(ctx: &egui::Context, wheel_count: usize, alpha: f32
 
     // Request repaint for smooth animation
     ctx.request_repaint();
+}
+
+/// Render file transfer notification popups (bottom-right corner)
+/// Shows upload progress with file name, progress bar, and speed
+fn render_file_transfer_notifications(
+    ctx: &egui::Context,
+    transfers: &[crate::app::types::FileTransfer],
+    actions: &mut Vec<crate::app::UiAction>,
+) {
+    use crate::app::types::FileTransferState;
+    use egui::{Align2, Color32, FontId, RichText};
+
+    // Show up to 3 transfers at once
+    let visible_transfers: Vec<_> = transfers.iter().take(3).collect();
+
+    for (idx, transfer) in visible_transfers.iter().enumerate() {
+        let y_offset = 80.0 + (idx as f32 * 90.0); // Stack vertically
+
+        egui::Area::new(egui::Id::new(format!("file_transfer_{}", transfer.id)))
+            .anchor(Align2::RIGHT_BOTTOM, [-20.0, -y_offset])
+            .interactable(true)
+            .order(egui::Order::Foreground)
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(Color32::from_rgba_unmultiplied(25, 25, 35, 240))
+                    .corner_radius(8.0)
+                    .inner_margin(egui::Margin::symmetric(14, 10))
+                    .stroke(egui::Stroke::new(1.0, Color32::from_rgb(60, 60, 80)))
+                    .show(ui, |ui| {
+                        ui.set_width(280.0);
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 6.0;
+
+                            // Header row with file name and close button
+                            ui.horizontal(|ui| {
+                                // Upload icon
+                                ui.label(
+                                    RichText::new("^")
+                                        .font(FontId::monospace(14.0))
+                                        .color(Color32::from_rgb(100, 180, 255)),
+                                );
+
+                                // File name (truncated)
+                                let display_name = if transfer.file_name.len() > 25 {
+                                    format!("{}...", &transfer.file_name[..22])
+                                } else {
+                                    transfer.file_name.clone()
+                                };
+                                ui.label(
+                                    RichText::new(&display_name)
+                                        .font(FontId::proportional(13.0))
+                                        .color(Color32::WHITE),
+                                );
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Close/dismiss button
+                                    let close_btn = egui::Button::new(
+                                        RichText::new("x")
+                                            .font(FontId::proportional(12.0))
+                                            .color(Color32::from_rgb(150, 150, 150)),
+                                    )
+                                    .fill(Color32::TRANSPARENT)
+                                    .frame(false);
+
+                                    if ui.add(close_btn).clicked() {
+                                        actions.push(crate::app::UiAction::DismissFileTransfer(
+                                            transfer.id.clone(),
+                                        ));
+                                    }
+                                });
+                            });
+
+                            // Progress bar
+                            let progress = transfer.progress_percent() as f32 / 100.0;
+                            let (bar_color, status_text) = match &transfer.state {
+                                FileTransferState::Pending => (
+                                    Color32::from_rgb(100, 100, 120),
+                                    "Starting...".to_string(),
+                                ),
+                                FileTransferState::Uploading => (
+                                    Color32::from_rgb(100, 180, 255),
+                                    format!("{}%", transfer.progress_percent()),
+                                ),
+                                FileTransferState::Complete => (
+                                    Color32::from_rgb(100, 200, 100),
+                                    "Complete".to_string(),
+                                ),
+                                FileTransferState::Failed(err) => (
+                                    Color32::from_rgb(220, 80, 80),
+                                    format!("Failed: {}", if err.len() > 20 { &err[..20] } else { err }),
+                                ),
+                            };
+
+                            // Custom progress bar
+                            let bar_height = 6.0;
+                            let bar_rect = ui.available_rect_before_wrap();
+                            let bar_rect = egui::Rect::from_min_size(
+                                bar_rect.min,
+                                egui::vec2(ui.available_width(), bar_height),
+                            );
+                            ui.allocate_space(egui::vec2(ui.available_width(), bar_height));
+
+                            // Background
+                            ui.painter().rect_filled(
+                                bar_rect,
+                                3.0,
+                                Color32::from_rgb(40, 40, 50),
+                            );
+
+                            // Progress fill
+                            if progress > 0.0 {
+                                let fill_rect = egui::Rect::from_min_size(
+                                    bar_rect.min,
+                                    egui::vec2(bar_rect.width() * progress, bar_height),
+                                );
+                                ui.painter().rect_filled(fill_rect, 3.0, bar_color);
+                            }
+
+                            ui.add_space(2.0);
+
+                            // Status row: size, speed, status
+                            ui.horizontal(|ui| {
+                                // File size
+                                ui.label(
+                                    RichText::new(transfer.size_string())
+                                        .font(FontId::monospace(10.0))
+                                        .color(Color32::from_rgb(140, 140, 150)),
+                                );
+
+                                // Speed (only when uploading)
+                                if matches!(transfer.state, FileTransferState::Uploading) {
+                                    ui.label(
+                                        RichText::new(format!("| {}", transfer.speed_string()))
+                                            .font(FontId::monospace(10.0))
+                                            .color(Color32::from_rgb(100, 180, 255)),
+                                    );
+                                }
+
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    // Status text
+                                    let status_color = match &transfer.state {
+                                        FileTransferState::Complete => Color32::from_rgb(100, 200, 100),
+                                        FileTransferState::Failed(_) => Color32::from_rgb(220, 80, 80),
+                                        _ => Color32::from_rgb(150, 150, 160),
+                                    };
+                                    ui.label(
+                                        RichText::new(&status_text)
+                                            .font(FontId::proportional(10.0))
+                                            .color(status_color),
+                                    );
+                                });
+                            });
+
+                            // Cancel button (only when uploading)
+                            if matches!(transfer.state, FileTransferState::Uploading | FileTransferState::Pending) {
+                                ui.add_space(4.0);
+                                let cancel_btn = egui::Button::new(
+                                    RichText::new("Cancel")
+                                        .font(FontId::proportional(11.0))
+                                        .color(Color32::from_rgb(200, 100, 100)),
+                                )
+                                .fill(Color32::from_rgb(50, 35, 35))
+                                .corner_radius(4.0);
+
+                                if ui.add_sized([ui.available_width(), 22.0], cancel_btn).clicked() {
+                                    actions.push(crate::app::UiAction::CancelFileTransfer(
+                                        transfer.id.clone(),
+                                    ));
+                                }
+                            }
+                        });
+                    });
+            });
+    }
+
+    // Request repaint for progress updates
+    if !transfers.is_empty() {
+        ctx.request_repaint();
+    }
 }

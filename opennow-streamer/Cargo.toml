@@ -89,6 +89,9 @@ once_cell = "1.19"
 # Clipboard support (cross-platform)
 arboard = "3"
 
+# QR code detection for ZNow
+rqrr = { version = "0.8", optional = true }
+
 # Platform-specific dependencies
 [target.'cfg(windows)'.dependencies]
 windows-numerics = "0.3"
@@ -163,8 +166,10 @@ features = ["xlib", "xinput"]
 optional = true
 
 [features]
-default = []
+default = ["qr-scanner"]
 x11-input = ["x11"]
+# QR code scanning for ZNow portable app launcher
+qr-scanner = ["rqrr"]
 # Enable Tracy profiler integration for performance analysis
 # Build with: cargo build --release --features tracy
 # Then run Tracy Profiler (https://github.com/wolfpld/tracy) and connect

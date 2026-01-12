@@ -12,7 +12,7 @@ pub use session::{ActiveSessionInfo, SessionInfo, SessionState};
 pub use types::{
     parse_resolution, AppState, GameInfo, GameSection, GameVariant, GamesTab, QueueRegionFilter,
     QueueSortMode, ServerInfo, ServerStatus, SettingChange, SharedFrame, SubscriptionInfo,
-    UiAction,
+    UiAction, ZNowApp, ZNowConnectionState, ZNowSession,
 };
 
 use log::{error, info, warn};
@@ -216,6 +216,26 @@ pub struct App {
 
     /// Ads total duration in seconds
     pub ads_total_secs: u32,
+
+    // === ZNow State ===
+    /// ZNow apps list
+    pub znow_apps: Vec<types::ZNowApp>,
+
+    /// ZNow session state
+    pub znow_session: types::ZNowSession,
+
+    /// Whether ZNow apps are loading
+    pub znow_loading: bool,
+
+    /// ZNow relay client command sender (set when connected)
+    pub znow_relay_tx: Option<mpsc::Sender<crate::znow::relay::OutgoingMessage>>,
+
+    /// QR scanner for detecting znow-runner codes
+    pub znow_qr_scanner: crate::znow::QrScanner,
+
+    // === File Transfer State ===
+    /// Active file transfers (drag & drop uploads)
+    pub file_transfers: Vec<types::FileTransfer>,
 }
 
 /// Poll interval for session status (2 seconds)
@@ -368,6 +388,14 @@ impl App {
             ads_required: false,
             ads_remaining_secs: 0,
             ads_total_secs: 0,
+            // ZNow state
+            znow_apps: Vec::new(),
+            znow_session: types::ZNowSession::default(),
+            znow_loading: false,
+            znow_relay_tx: None,
+            znow_qr_scanner: crate::znow::QrScanner::new(),
+            // File transfer state
+            file_transfers: Vec::new(),
         }
     }
 
@@ -423,6 +451,7 @@ impl App {
                     GamesTab::AllGames => self.games.get(index).cloned(),
                     GamesTab::MyLibrary => self.library_games.get(index).cloned(),
                     GamesTab::QueueTimes => None, // Queue Times tab doesn't launch games
+                    GamesTab::ZNow => None, // ZNow tab uses its own launch mechanism
                 };
                 if let Some(game) = game {
                     self.launch_game(&game);
@@ -677,8 +706,546 @@ impl App {
                     }
                 }
             }
+
+            // === ZNow Actions ===
+            UiAction::RefreshZNowApps => {
+                self.refresh_znow_apps();
+            }
+            UiAction::SelectZNowApp(app) => {
+                self.znow_session.selected_app = Some(app);
+            }
+            UiAction::LaunchZNowSession(app) => {
+                self.launch_znow_session(app);
+            }
+            UiAction::ZNowInstallApp(app_id) => {
+                self.znow_send_install_command(&app_id);
+            }
+            UiAction::ZNowLaunchApp(app_id) => {
+                self.znow_send_launch_command(&app_id);
+            }
+            UiAction::ZNowConnect => {
+                self.znow_connect_relay();
+            }
+            UiAction::ZNowDisconnect => {
+                self.znow_disconnect_relay();
+            }
+            UiAction::ZNowPaired(exe_code) => {
+                self.znow_handle_pairing(exe_code);
+            }
+            UiAction::ZNowStatusUpdate(state) => {
+                self.znow_session.state = state;
+            }
+            // File transfer actions
+            UiAction::FileDropped(path) => {
+                self.start_file_upload(path);
+            }
+            UiAction::CancelFileTransfer(transfer_id) => {
+                self.cancel_file_transfer(&transfer_id);
+            }
+            UiAction::DismissFileTransfer(transfer_id) => {
+                self.file_transfers.retain(|t| t.id != transfer_id);
+            }
         }
     }
+
+    // =========================================================================
+    // ZNow Methods
+    // =========================================================================
+
+    /// Refresh ZNow apps list from the relay server
+    fn refresh_znow_apps(&mut self) {
+        if self.znow_loading {
+            return;
+        }
+
+        self.znow_loading = true;
+        let rt = self.runtime.clone();
+
+        rt.spawn(async move {
+            let client = crate::znow::ZNowApiClient::new();
+            match client.fetch_apps().await {
+                Ok(apps) => {
+                    info!("Fetched {} ZNow apps", apps.len());
+                    // Note: In a real impl, we'd need to send these back to the main thread
+                    // For now, they'll be cached and fetched synchronously
+                    cache::save_znow_apps_cache(&apps);
+                }
+                Err(e) => {
+                    error!("Failed to fetch ZNow apps: {}", e);
+                }
+            }
+        });
+
+        // Load from cache for immediate display
+        if let Some(apps) = cache::load_znow_apps_cache() {
+            self.znow_apps = apps;
+        }
+        self.znow_loading = false;
+    }
+
+    /// Launch a ZNow session (start GFN with placeholder game)
+    fn launch_znow_session(&mut self, app: types::ZNowApp) {
+        info!("Launching ZNow session for app: {}", app.name);
+
+        // Store selected app
+        self.znow_session.selected_app = Some(app.clone());
+
+        // Generate session code
+        let session_code = uuid::Uuid::new_v4().to_string()[..8]
+            .to_string()
+            .to_uppercase();
+        self.znow_session.client_code = Some(session_code.clone());
+        self.znow_session.state = types::ZNowConnectionState::Connecting;
+
+        // Connect to relay server
+        self.znow_connect_relay();
+
+        // Create a GameInfo for the placeholder game
+        let placeholder_game = GameInfo {
+            id: app.game_id.clone(),
+            title: format!("ZNow: {}", app.name),
+            publisher: Some("ZNow".to_string()),
+            image_url: Some(app.icon_url.clone()),
+            store: "NVIDIA".to_string(),
+            app_id: app.game_id.parse().ok(),
+            is_install_to_play: true,
+            play_type: None,
+            membership_tier_label: None,
+            playability_text: None,
+            uuid: None,
+            description: Some(app.description.clone()),
+            variants: vec![],
+            selected_variant_index: 0,
+        };
+
+        // Launch the GFN session
+        self.launch_game(&placeholder_game);
+
+        // Start QR scanner
+        self.znow_qr_scanner.start();
+        self.znow_session.state = types::ZNowConnectionState::WaitingForQR;
+    }
+
+    /// Connect to ZNow relay server
+    fn znow_connect_relay(&mut self) {
+        let session_code = match &self.znow_session.client_code {
+            Some(code) => code.clone(),
+            None => {
+                let code = uuid::Uuid::new_v4().to_string()[..8]
+                    .to_string()
+                    .to_uppercase();
+                self.znow_session.client_code = Some(code.clone());
+                code
+            }
+        };
+
+        info!("Connecting to ZNow relay with code: {}", session_code);
+        self.znow_session.state = types::ZNowConnectionState::Connecting;
+
+        let rt = self.runtime.clone();
+        rt.spawn(async move {
+            let client = crate::znow::ZNowRelayClient::new(&session_code);
+            match client.connect().await {
+                Ok((cmd_tx, mut event_rx)) => {
+                    info!("Connected to ZNow relay");
+                    // Store the command sender so main thread can use it
+                    cache::set_znow_relay_sender(cmd_tx);
+
+                    // Forward events to main thread via cache
+                    while let Some(event) = event_rx.recv().await {
+                        info!("ZNow relay event: {:?}", event);
+                        cache::push_znow_relay_event(event);
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to connect to ZNow relay: {}", e);
+                    cache::push_znow_relay_event(crate::znow::relay::RelayEvent::Error(
+                        format!("Connection failed: {}", e)
+                    ));
+                }
+            }
+        });
+    }
+
+    /// Disconnect from ZNow relay
+    fn znow_disconnect_relay(&mut self) {
+        self.znow_relay_tx = None;
+        cache::clear_znow_relay_sender();
+        self.znow_session.state = types::ZNowConnectionState::Disconnected;
+        self.znow_qr_scanner.stop();
+    }
+
+    /// Handle pairing with znow-runner
+    fn znow_handle_pairing(&mut self, exe_code: String) {
+        info!("ZNow pairing with exe code: {}", exe_code);
+        self.znow_session.exe_code = Some(exe_code.clone());
+        self.znow_session.state = types::ZNowConnectionState::Pairing;
+
+        // Try to get sender from cache if not already set
+        if self.znow_relay_tx.is_none() {
+            if let Some(sender) = cache::take_znow_relay_sender() {
+                info!("Acquired ZNow relay sender from cache for pairing");
+                self.znow_relay_tx = Some(sender);
+            }
+        }
+
+        // Send pair request to relay
+        if let (Some(tx), Some(client_code)) =
+            (&self.znow_relay_tx, &self.znow_session.client_code)
+        {
+            let tx = tx.clone();
+            let client_code = client_code.clone();
+            let rt = self.runtime.clone();
+
+            info!("Sending pair request: client={}, exe={}", client_code, exe_code);
+            rt.spawn(async move {
+                let msg = crate::znow::relay::OutgoingMessage::PairRequest {
+                    clientCode: client_code,
+                    exeCode: exe_code,
+                };
+                if let Err(e) = tx.send(msg).await {
+                    log::error!("Failed to send pair request: {}", e);
+                } else {
+                    log::info!("Pair request sent successfully");
+                }
+            });
+        } else {
+            warn!("Cannot send pair request: relay not connected (tx={:?}, code={:?})",
+                  self.znow_relay_tx.is_some(), self.znow_session.client_code);
+        }
+    }
+
+    /// Send install command to znow-runner
+    fn znow_send_install_command(&mut self, app_id: &str) {
+        info!("Sending ZNow install command for app: {}", app_id);
+
+        if let Some(tx) = &self.znow_relay_tx {
+            let tx = tx.clone();
+            let app_id_clone = app_id.to_string();
+            let rt = self.runtime.clone();
+
+            rt.spawn(async move {
+                let msg = crate::znow::relay::OutgoingMessage::InstallApp { appId: app_id_clone.clone() };
+                if let Err(e) = tx.send(msg).await {
+                    log::error!("Failed to send install command: {}", e);
+                } else {
+                    log::info!("Install command sent for app: {}", app_id_clone);
+                }
+            });
+
+            if let Some(app) = &self.znow_session.selected_app {
+                self.znow_session.state = types::ZNowConnectionState::Installing {
+                    app_name: app.name.clone(),
+                    progress: 0,
+                };
+            }
+        } else {
+            warn!("Cannot send install command: relay not connected");
+        }
+    }
+
+    /// Send launch command to znow-runner
+    fn znow_send_launch_command(&mut self, app_id: &str) {
+        info!("Sending ZNow launch command for app: {}", app_id);
+
+        if let Some(tx) = &self.znow_relay_tx {
+            let tx = tx.clone();
+            let app_id_clone = app_id.to_string();
+            let rt = self.runtime.clone();
+
+            rt.spawn(async move {
+                let msg = crate::znow::relay::OutgoingMessage::LaunchApp { appId: app_id_clone.clone() };
+                if let Err(e) = tx.send(msg).await {
+                    log::error!("Failed to send launch command: {}", e);
+                } else {
+                    log::info!("Launch command sent for app: {}", app_id_clone);
+                }
+            });
+
+            if let Some(app) = &self.znow_session.selected_app {
+                self.znow_session.state = types::ZNowConnectionState::Launching {
+                    app_name: app.name.clone(),
+                };
+            }
+        } else {
+            warn!("Cannot send launch command: relay not connected");
+        }
+    }
+
+    /// Scan current video frame for QR codes (called during streaming)
+    pub fn znow_scan_frame(&mut self, frame_data: &[u8], width: u32, height: u32) {
+        if !self.znow_qr_scanner.is_active() {
+            return;
+        }
+
+        if let Some(code) = self.znow_qr_scanner.scan_frame(frame_data, width, height) {
+            info!("ZNow QR code detected: {}", code);
+            self.znow_handle_pairing(code);
+        }
+    }
+
+    /// Get filtered ZNow apps based on search query
+    pub fn filtered_znow_apps(&self) -> Vec<&types::ZNowApp> {
+        let query = self.search_query.to_lowercase();
+        self.znow_apps
+            .iter()
+            .filter(|app| query.is_empty() || app.name.to_lowercase().contains(&query))
+            .collect()
+    }
+
+    /// Handle relay events from the ZNow relay server
+    fn handle_znow_relay_event(&mut self, event: crate::znow::relay::RelayEvent) {
+        use crate::znow::relay::RelayEvent;
+
+        match event {
+            RelayEvent::Connected => {
+                info!("ZNow relay: connected");
+                if self.znow_session.state == types::ZNowConnectionState::Connecting {
+                    self.znow_session.state = types::ZNowConnectionState::WaitingForSession;
+                }
+            }
+            RelayEvent::Paired { session_id } => {
+                info!("ZNow relay: paired with session {:?}", session_id);
+                self.znow_session.state = types::ZNowConnectionState::Connected;
+
+                // After pairing, automatically send install command for the selected app
+                if let Some(app) = &self.znow_session.selected_app {
+                    let app_id = app.id.clone();
+                    info!("Auto-sending install command for app: {}", app.name);
+                    self.znow_send_install_command(&app_id);
+                }
+            }
+            RelayEvent::StatusUpdate { state, progress, message } => {
+                info!("ZNow relay status: {} (progress: {:?}, msg: {:?})", state, progress, message);
+
+                // Update our state based on relay status
+                match state.as_str() {
+                    "INSTALLING" => {
+                        if let Some(app) = &self.znow_session.selected_app {
+                            self.znow_session.state = types::ZNowConnectionState::Installing {
+                                app_name: app.name.clone(),
+                                progress: progress.unwrap_or(0),
+                            };
+                        }
+                    }
+                    "LAUNCHING" => {
+                        if let Some(app) = &self.znow_session.selected_app {
+                            self.znow_session.state = types::ZNowConnectionState::Launching {
+                                app_name: app.name.clone(),
+                            };
+                        }
+                    }
+                    "RUNNING" => {
+                        if let Some(app) = &self.znow_session.selected_app {
+                            self.znow_session.state = types::ZNowConnectionState::Running {
+                                app_name: app.name.clone(),
+                            };
+                        }
+                    }
+                    "INSTALLED" => {
+                        // App installed, now launch it
+                        if let Some(app) = &self.znow_session.selected_app {
+                            let app_id = app.id.clone();
+                            info!("App installed, sending launch command for: {}", app.name);
+                            self.znow_send_launch_command(&app_id);
+                        }
+                    }
+                    "ERROR" => {
+                        let error_msg = message.unwrap_or_else(|| "Unknown error".to_string());
+                        self.znow_session.state = types::ZNowConnectionState::Error(error_msg);
+                    }
+                    _ => {
+                        info!("Unknown ZNow status: {}", state);
+                    }
+                }
+            }
+            RelayEvent::ExeDisconnected => {
+                warn!("ZNow relay: exe disconnected");
+                self.znow_session.state = types::ZNowConnectionState::Error(
+                    "ZNow runner disconnected".to_string()
+                );
+            }
+            RelayEvent::Error(msg) => {
+                error!("ZNow relay error: {}", msg);
+                self.znow_session.state = types::ZNowConnectionState::Error(msg);
+            }
+            RelayEvent::Disconnected => {
+                info!("ZNow relay: disconnected");
+                self.znow_relay_tx = None;
+                if !matches!(self.znow_session.state, types::ZNowConnectionState::Running { .. }) {
+                    self.znow_session.state = types::ZNowConnectionState::Disconnected;
+                }
+            }
+            // File transfer events
+            RelayEvent::FileUploadAck { transfer_id } => {
+                info!("File upload acknowledged: {}", transfer_id);
+                if let Some(transfer) = self.file_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                    transfer.state = types::FileTransferState::Uploading;
+                }
+            }
+            RelayEvent::FileUploadProgress { transfer_id, bytes_received } => {
+                if let Some(transfer) = self.file_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                    transfer.transferred_bytes = bytes_received;
+                    // Calculate speed
+                    let elapsed = transfer.start_time.elapsed().as_secs_f64();
+                    if elapsed > 0.0 {
+                        transfer.speed_bps = (bytes_received as f64 / elapsed) as u64;
+                    }
+                }
+            }
+            RelayEvent::FileUploadSuccess { transfer_id, saved_path } => {
+                info!("File upload complete: {} -> {}", transfer_id, saved_path);
+                if let Some(transfer) = self.file_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                    transfer.transferred_bytes = transfer.total_bytes;
+                    transfer.state = types::FileTransferState::Complete;
+                }
+            }
+            RelayEvent::FileUploadError { transfer_id, error } => {
+                error!("File upload failed: {} - {}", transfer_id, error);
+                if let Some(transfer) = self.file_transfers.iter_mut().find(|t| t.id == transfer_id) {
+                    transfer.state = types::FileTransferState::Failed(error);
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // End ZNow Methods
+    // =========================================================================
+
+    // =========================================================================
+    // File Transfer Methods
+    // =========================================================================
+
+    /// Start uploading a file via the ZNow relay
+    fn start_file_upload(&mut self, path: std::path::PathBuf) {
+        use base64::Engine;
+
+        // Check if we have a relay connection
+        if self.znow_relay_tx.is_none() {
+            warn!("Cannot upload file: not connected to relay");
+            return;
+        }
+
+        // Get file info
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+
+        let file_size = match std::fs::metadata(&path) {
+            Ok(meta) => meta.len(),
+            Err(e) => {
+                error!("Cannot read file metadata: {}", e);
+                return;
+            }
+        };
+
+        // Generate transfer ID
+        let transfer_id = uuid::Uuid::new_v4().to_string()[..8].to_uppercase();
+
+        info!(
+            "Starting file upload: {} ({} bytes) - ID: {}",
+            file_name, file_size, transfer_id
+        );
+
+        // Create transfer record
+        let transfer = types::FileTransfer::new(
+            transfer_id.clone(),
+            file_name.clone(),
+            file_size,
+        );
+        self.file_transfers.push(transfer);
+
+        // Send file in background task
+        let tx = self.znow_relay_tx.clone().unwrap();
+        let rt = self.runtime.clone();
+        let tid = transfer_id.clone();
+
+        rt.spawn(async move {
+            // Read file
+            let file_data = match tokio::fs::read(&path).await {
+                Ok(data) => data,
+                Err(e) => {
+                    error!("Failed to read file: {}", e);
+                    return;
+                }
+            };
+
+            // Send start message
+            let start_msg = crate::znow::relay::OutgoingMessage::FileUploadStart {
+                transferId: tid.clone(),
+                fileName: file_name,
+                fileSize: file_size,
+                mimeType: None,
+            };
+            if tx.send(start_msg).await.is_err() {
+                error!("Failed to send file upload start");
+                return;
+            }
+
+            // Send chunks (64KB each)
+            const CHUNK_SIZE: usize = 64 * 1024;
+            let mut chunk_index = 0u32;
+
+            for chunk in file_data.chunks(CHUNK_SIZE) {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(chunk);
+                let chunk_msg = crate::znow::relay::OutgoingMessage::FileUploadChunk {
+                    transferId: tid.clone(),
+                    chunkIndex: chunk_index,
+                    data: encoded,
+                };
+
+                if tx.send(chunk_msg).await.is_err() {
+                    error!("Failed to send file chunk {}", chunk_index);
+                    return;
+                }
+
+                chunk_index += 1;
+
+                // Small delay to avoid overwhelming the connection
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+            }
+
+            // Send complete message
+            let complete_msg = crate::znow::relay::OutgoingMessage::FileUploadComplete {
+                transferId: tid.clone(),
+            };
+            if tx.send(complete_msg).await.is_err() {
+                error!("Failed to send file upload complete");
+            }
+
+            info!("File upload sent: {} chunks", chunk_index);
+        });
+    }
+
+    /// Cancel an ongoing file transfer
+    fn cancel_file_transfer(&mut self, transfer_id: &str) {
+        info!("Cancelling file transfer: {}", transfer_id);
+
+        // Update local state
+        if let Some(transfer) = self.file_transfers.iter_mut().find(|t| t.id == transfer_id) {
+            transfer.state = types::FileTransferState::Failed("Cancelled".to_string());
+        }
+
+        // Send cancel to relay
+        if let Some(tx) = &self.znow_relay_tx {
+            let tx = tx.clone();
+            let tid = transfer_id.to_string();
+            let rt = self.runtime.clone();
+
+            rt.spawn(async move {
+                let cancel_msg = crate::znow::relay::OutgoingMessage::FileUploadCancel {
+                    transferId: tid,
+                };
+                let _ = tx.send(cancel_msg).await;
+            });
+        }
+    }
+
+    // =========================================================================
+    // End File Transfer Methods
+    // =========================================================================
 
     /// Get filtered games based on search query
     pub fn filtered_games(&self) -> Vec<(usize, &GameInfo)> {
@@ -866,6 +1433,21 @@ impl App {
                     self.stats.resolution = new_res;
                 }
 
+                // Scan frame for ZNow QR code if scanner is active
+                if self.znow_qr_scanner.is_active() {
+                    // Use Y plane (luma) as grayscale for QR detection
+                    // Pass stride to handle padding correctly
+                    if let Some(code) = self.znow_qr_scanner.scan_frame_with_stride(
+                        &frame.y_plane,
+                        frame.width,
+                        frame.height,
+                        frame.y_stride,
+                    ) {
+                        info!("ZNow QR code detected from video: {}", code);
+                        self.znow_handle_pairing(code);
+                    }
+                }
+
                 self.current_frame = Some(frame);
                 // Increment render frame count only when we get a new video frame
                 // This ensures render FPS matches decode FPS
@@ -1009,6 +1591,23 @@ impl App {
         // Check for queue ping test results
         if self.queue_ping_testing {
             self.load_queue_ping_results();
+        }
+
+        // Check for ZNow relay sender from async connect task
+        if self.znow_relay_tx.is_none() {
+            if let Some(sender) = cache::take_znow_relay_sender() {
+                info!("Acquired ZNow relay sender from cache");
+                self.znow_relay_tx = Some(sender);
+                // Update state to waiting for QR if we're still connecting
+                if self.znow_session.state == types::ZNowConnectionState::Connecting {
+                    self.znow_session.state = types::ZNowConnectionState::WaitingForSession;
+                }
+            }
+        }
+
+        // Process ZNow relay events
+        for event in cache::take_znow_relay_events() {
+            self.handle_znow_relay_event(event);
         }
 
         // Check for active sessions from async check
