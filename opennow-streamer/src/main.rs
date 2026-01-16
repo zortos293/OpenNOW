@@ -20,7 +20,7 @@ mod znow;
 pub use profiling::frame_mark;
 
 use anyhow::Result;
-use log::info;
+use log::{debug, info};
 use parking_lot::Mutex;
 use std::sync::Arc;
 use winit::application::ApplicationHandler;
