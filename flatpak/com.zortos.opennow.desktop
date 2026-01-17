@@ -1,9 +1,0 @@
-[Desktop Entry]
-Name=OpenNOW
-Comment=Open source GeForce NOW client
-Exec=opennow
-Icon=com.zortos.opennow
-Terminal=false
-Type=Application
-Categories=Game;
-Keywords=geforce;now;cloud;gaming;streaming;nvidia;
