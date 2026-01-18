@@ -999,89 +999,41 @@ jobs:
       #     path: opennow-streamer/target/release/OpenNOW-macos-x86_64.zip
       #     retention-days: 30
 
-      - name: Bundle Linux x64 binary
+      - name: Install AppImage tooling (Linux x64)
         if: matrix.target == 'linux'
         shell: bash
         run: |
-          cd opennow-streamer
+          sudo apt-get update
+          sudo apt-get install -y python3-pip patchelf squashfs-tools
+          python3 -m pip install --upgrade appimage-builder
 
-          BINARY="target/release/opennow-streamer"
-          BUNDLE_DIR="target/release/bundle"
-          LIB_DIR="$BUNDLE_DIR/lib"
-          GST_PLUGIN_DIR="$BUNDLE_DIR/lib/gstreamer-1.0"
+      - name: Prepare AppImage recipe (Linux x64)
+        if: matrix.target == 'linux'
+        shell: bash
+        env:
+          VERSION: ${{ needs.get-version.outputs.version_number }}
+        run: |
+          sed -i "s/__VERSION__/${VERSION}/" AppImageBuilder.yml
 
-          echo "Creating bundle directory structure..."
-          mkdir -p "$BUNDLE_DIR" "$LIB_DIR" "$GST_PLUGIN_DIR"
-
-          # Copy the binary
-          cp "$BINARY" "$BUNDLE_DIR/"
-          chmod +x "$BUNDLE_DIR/opennow-streamer"
-
-          # Copy GStreamer libraries for x64
-          echo "Bundling GStreamer libraries..."
-
-          # Core GStreamer libraries and their dependencies
-          for lib in /usr/lib/x86_64-linux-gnu/libgstreamer-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstbase-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstapp-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstaudio-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstvideo-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstpbutils-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstrtp-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstcodecs-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgstgl-1.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libglib-2.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgobject-2.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgmodule-2.0.so* \
-                     /usr/lib/x86_64-linux-gnu/libgio-2.0.so* \
-                     /usr/lib/x86_64-linux-gnu/liborc-0.4.so* \
-                     /usr/lib/x86_64-linux-gnu/libpcre.so* \
-                     /usr/lib/x86_64-linux-gnu/libpcre2-8.so* \
-                     /usr/lib/x86_64-linux-gnu/libffi.so*; do
-            if [ -f "$lib" ]; then
-              cp -L "$lib" "$LIB_DIR/" 2>/dev/null || true
-            fi
-          done
-
-          # Copy GStreamer plugins
-          echo "Bundling GStreamer plugins..."
-          if [ -d "/usr/lib/x86_64-linux-gnu/gstreamer-1.0" ]; then
-            cp -L /usr/lib/x86_64-linux-gnu/gstreamer-1.0/*.so "$GST_PLUGIN_DIR/" 2>/dev/null || true
+      - name: Build AppImage (Linux x64)
+        if: matrix.target == 'linux'
+        shell: bash
+        run: |
+          appimage-builder --recipe AppImageBuilder.yml --skip-test
+          mkdir -p opennow-streamer/target/release
+          APPIMAGE_PATH=$(ls -1 *.AppImage | head -1)
+          if [ -z "$APPIMAGE_PATH" ]; then
+            echo "AppImage output not found"
+            exit 1
           fi
-
-          # Count bundled files
-          LIB_COUNT=$(ls -1 "$LIB_DIR"/*.so* 2>/dev/null | wc -l)
-          PLUGIN_COUNT=$(ls -1 "$GST_PLUGIN_DIR"/*.so 2>/dev/null | wc -l)
-          echo "Bundled $LIB_COUNT libraries and $PLUGIN_COUNT plugins"
-
-          # Create wrapper script that sets library paths
-          # Note: We prepend bundled plugins to GST_PLUGIN_PATH but still allow system plugins
-          # as fallback. GST_REGISTRY_UPDATE=yes forces GStreamer to rescan plugins on startup.
-          echo '#!/bin/bash' > "$BUNDLE_DIR/run.sh"
-          echo 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' >> "$BUNDLE_DIR/run.sh"
-          echo 'export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"' >> "$BUNDLE_DIR/run.sh"
-          echo 'export GST_PLUGIN_PATH="$SCRIPT_DIR/lib/gstreamer-1.0${GST_PLUGIN_PATH:+:$GST_PLUGIN_PATH}"' >> "$BUNDLE_DIR/run.sh"
-          echo 'export GST_REGISTRY_UPDATE=yes' >> "$BUNDLE_DIR/run.sh"
-          echo 'exec "$SCRIPT_DIR/opennow-streamer" "$@"' >> "$BUNDLE_DIR/run.sh"
-          chmod +x "$BUNDLE_DIR/run.sh"
-
-          echo ""
-          echo "Bundle created at: $BUNDLE_DIR"
-          echo "Run with: ./run.sh (uses bundled libraries with system fallback)"
-
-      - name: Zip Linux x64 artifacts
-        if: matrix.target == 'linux'
-        shell: bash
-        run: |
-          cd opennow-streamer/target/release
-          zip -r "OpenNOW-linux-x64.zip" bundle/
+          mv "$APPIMAGE_PATH" opennow-streamer/target/release/OpenNOW-linux-x64.AppImage
 
       - name: Upload Linux x64 artifacts
         if: matrix.target == 'linux'
         uses: actions/upload-artifact@v4
         with:
           name: opennow-streamer-${{ needs.get-version.outputs.version }}-linux-x64
-          path: opennow-streamer/target/release/OpenNOW-linux-x64.zip
+          path: opennow-streamer/target/release/OpenNOW-linux-x64.AppImage
           retention-days: 30
 
       - name: Zip Linux ARM64 artifacts
@@ -1120,10 +1072,10 @@ jobs:
             - **Windows x64**: Portable executable with bundled GStreamer
             - **Windows ARM64**: Portable executable with bundled GStreamer (Surface Pro X, etc.)
             - **macOS ARM64**: Apple Silicon native binary with bundled FFmpeg + GStreamer (Intel Macs can use Rosetta 2)
-            - **Linux x64**: Portable binary (requires system GStreamer - see below)
+            - **Linux x64**: AppImage with bundled GStreamer
             - **Linux ARM64**: Portable binary (requires system GStreamer - see below)
 
-            **Linux users**: Install GStreamer via your package manager:
+            **Linux ARM64 users**: Install GStreamer via your package manager:
             ```bash
             # Ubuntu/Debian
             sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
@@ -1187,7 +1139,7 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.get-version.outputs.version }}
-          files: opennow-streamer/target/release/OpenNOW-linux-x64.zip
+          files: opennow-streamer/target/release/OpenNOW-linux-x64.AppImage
           fail_on_unmatched_files: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

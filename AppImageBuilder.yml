@@ -1,0 +1,80 @@
+version: 1
+
+script:
+  - rm -rf AppDir || true
+  - mkdir -p AppDir/usr/bin
+  - mkdir -p AppDir/usr/share/applications
+  - mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+  - cp opennow-streamer/target/release/opennow-streamer AppDir/usr/bin/opennow
+  - cp packaging/com.zortos.opennow.desktop AppDir/usr/share/applications/
+  - cp img.png AppDir/usr/share/icons/hicolor/256x256/apps/com.zortos.opennow.png
+
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: com.zortos.opennow
+    name: OpenNOW
+    icon: com.zortos.opennow
+    version: __VERSION__
+    exec: usr/bin/opennow
+    exec_args: $@
+
+  apt:
+    arch: amd64
+    sources:
+      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse"
+      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse"
+      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse"
+    include:
+      - libasound2
+      - libx11-6
+      - libxrandr2
+      - libxi6
+      - libgl1
+      - libudev1
+      - libunwind8
+      - libgcc-s1
+      - libstdc++6
+      - libc6
+      - libgstreamer1.0-0
+      - libgstreamer-plugins-base1.0-0
+      - libgstreamer-plugins-bad1.0-0
+      - gstreamer1.0-plugins-base
+      - gstreamer1.0-plugins-good
+      - gstreamer1.0-plugins-bad
+      - gstreamer1.0-plugins-ugly
+      - gstreamer1.0-libav
+      - gstreamer1.0-tools
+    exclude:
+      - libwayland-client0
+      - libwayland-cursor0
+      - libwayland-egl1
+      - libwayland-server0
+      - libegl1-mesa
+      - libgles2-mesa
+      - libglx-mesa0
+      - libdrm2
+      - libgbm1
+      - libxshmfence1
+      - libvulkan1
+
+  files:
+    exclude:
+      - usr/share/doc
+      - usr/share/man
+      - usr/share/locale
+      - usr/lib/systemd
+      - usr/lib/udev
+      - usr/lib/tmpfiles.d
+      - usr/lib/x86_64-linux-gnu/dri
+
+  runtime:
+    env:
+      GST_PLUGIN_PATH: "${APPDIR}/usr/lib/x86_64-linux-gnu/gstreamer-1.0"
+      GST_REGISTRY_UPDATE: "yes"
+
+  test:
+    ubuntu:
+      image: appimagecrafters/tests-env:ubuntu-jammy
+      command: ./AppRun
+      use_host_x: true
