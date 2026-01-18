@@ -22,9 +22,12 @@ AppDir:
   apt:
     arch: amd64
     sources:
-      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse"
-      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse"
-      - sourceline: "deb http://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse"
+      - sourceline: "deb https://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse"
+        key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C"
+      - sourceline: "deb https://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse"
+        key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C"
+      - sourceline: "deb https://archive.ubuntu.com/ubuntu/ jammy-security main restricted universe multiverse"
+        key_url: "https://keyserver.ubuntu.com/pks/lookup?op=get&search=0x871920D1991BC93C"
     include:
       - libasound2
       - libx11-6
