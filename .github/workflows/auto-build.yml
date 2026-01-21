@@ -26,7 +26,7 @@ jobs:
       !contains(github.event.head_commit.message, '[skip ci]') &&
       !contains(github.event.head_commit.message, '[no build]') &&
       !contains(github.event.head_commit.message, '[skip build]')
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2204
     outputs:
       version: ${{ steps.get_version.outputs.version }}
       version_number: ${{ steps.get_version.outputs.version_number }}
@@ -158,13 +158,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: ubuntu-22.04
+          - platform: blacksmith-4vcpu-ubuntu-2204
             target: linux
             arch: x86_64
             rust_target: x86_64-unknown-linux-gnu
           # Linux ARM64: Use native ARM64 runner instead of cross-compilation
           # This avoids the libunwind-dev and glib ABI conflicts
-          - platform: ubuntu-22.04-arm
+          - platform: blacksmith-4vcpu-ubuntu-2204-arm
             target: linux-arm64
             arch: aarch64
             rust_target: aarch64-unknown-linux-gnu
@@ -179,11 +179,11 @@ jobs:
           #   arch: x86_64
           #   rust_target: x86_64-apple-darwin
           #   features: legacy-macos
-          - platform: windows-latest
+          - platform: blacksmith-4vcpu-windows-2025
             target: windows
             arch: x86_64
             rust_target: x86_64-pc-windows-msvc
-          - platform: windows-latest
+          - platform: blacksmith-4vcpu-windows-2025
             target: windows-arm64
             arch: aarch64
             rust_target: aarch64-pc-windows-msvc
@@ -223,7 +223,7 @@ jobs:
 
       # macOS builds natively for ARM64 (macos-latest is ARM64)
       # Intel Mac users can use Rosetta 2 to run ARM64 binaries
-      # Linux ARM64 builds natively on ubuntu-22.04-arm (no cross-compilation)
+      # Linux ARM64 builds natively on ARM64 runner (no cross-compilation)
 
       - name: Add Windows ARM64 target
         if: matrix.target == 'windows-arm64'
@@ -440,7 +440,6 @@ jobs:
           echo "GStreamer development libraries installed"
 
       # Linux ARM64: Native compilation on ARM64 runner (no cross-compilation needed!)
-      # This uses GitHub's native ARM64 runners which are free for public repos
       - name: Install GStreamer (Linux ARM64)
         if: matrix.target == 'linux-arm64'
         run: |
@@ -508,16 +507,6 @@ jobs:
           cargo build --release --verbose
           echo "macOS ARM64 build complete"
 
-      # NOTE: Legacy macOS Intel build temporarily disabled - macOS-13 runners retired
-      # - name: Build native client (macOS Intel - Legacy)
-      #   if: matrix.target == 'macos-intel'
-      #   shell: bash
-      #   working-directory: opennow-streamer
-      #   run: |
-      #     echo "Building for macOS Intel x64 (Legacy mode for 2015 and older Macs)..."
-      #     cargo build --release --features legacy-macos --verbose
-      #     echo "macOS Intel build complete"
-
       - name: Build native client (Linux x64)
         if: matrix.target == 'linux'
         shell: bash
@@ -545,18 +534,12 @@ jobs:
           $gstBinDir = $env:GSTREAMER_BIN_DIR
           $gstPluginDir = $env:GSTREAMER_PLUGIN_DIR
 
-          # GStreamer DLLs MUST be next to the exe because Rust links to them at load time
-          # (Windows loads DLLs before any Rust code runs, so we can't set PATH first)
-          # Core DLLs go next to exe, plugins go in lib/gstreamer-1.0/
           $gstBundlePlugins = "$targetDir\lib\gstreamer-1.0"
 
           New-Item -ItemType Directory -Force -Path $gstBundlePlugins | Out-Null
 
-          Write-Host "Copying ALL GStreamer DLLs from $gstBinDir to $targetDir (next to exe for load-time linking)..."
+          Write-Host "Copying ALL GStreamer DLLs from $gstBinDir to $targetDir..."
 
-          # Copy ALL DLLs from GStreamer bin directory
-          # This ensures we don't miss any dependencies (ffi, intl, glib, etc.)
-          # The GStreamer Rust bindings link at load time, so ALL dependencies must be present
           $allDlls = Get-ChildItem -Path $gstBinDir -Filter "*.dll" -ErrorAction SilentlyContinue
           $copiedCount = 0
           foreach ($dll in $allDlls) {
@@ -565,8 +548,6 @@ jobs:
           }
           Write-Host "Copied $copiedCount DLLs from GStreamer bin directory"
 
-          # Copy ALL plugins from GStreamer plugin directory
-          # This ensures we don't miss any required plugins (opus, audio, video, etc.)
           Write-Host "`nCopying ALL GStreamer plugins to $gstBundlePlugins..."
           $allPlugins = Get-ChildItem -Path $gstPluginDir -Filter "*.dll" -ErrorAction SilentlyContinue
           $pluginCount = 0
@@ -590,18 +571,12 @@ jobs:
           $gstBinDir = $env:GSTREAMER_BIN_DIR
           $gstPluginDir = $env:GSTREAMER_PLUGIN_DIR
 
-          # GStreamer DLLs MUST be next to the exe because Rust links to them at load time
-          # (Windows loads DLLs before any Rust code runs, so we can't set PATH first)
-          # Core DLLs go next to exe, plugins go in lib/gstreamer-1.0/
           $gstBundlePlugins = "$targetDir\lib\gstreamer-1.0"
 
           New-Item -ItemType Directory -Force -Path $gstBundlePlugins | Out-Null
 
-          Write-Host "Copying ALL GStreamer DLLs from $gstBinDir to $targetDir (next to exe for load-time linking)..."
+          Write-Host "Copying ALL GStreamer DLLs from $gstBinDir to $targetDir..."
 
-          # Copy ALL DLLs from GStreamer bin directory
-          # This ensures we don't miss any dependencies (ffi, intl, glib, etc.)
-          # The GStreamer Rust bindings link at load time, so ALL dependencies must be present
           $allDlls = Get-ChildItem -Path $gstBinDir -Filter "*.dll" -ErrorAction SilentlyContinue
           $copiedCount = 0
           foreach ($dll in $allDlls) {
@@ -610,8 +585,6 @@ jobs:
           }
           Write-Host "Copied $copiedCount DLLs from GStreamer bin directory"
 
-          # Copy ALL plugins from GStreamer plugin directory
-          # This ensures we don't miss any required plugins (opus, audio, video, etc.)
           Write-Host "`nCopying ALL GStreamer plugins to $gstBundlePlugins..."
           $allPlugins = Get-ChildItem -Path $gstPluginDir -Filter "*.dll" -ErrorAction SilentlyContinue
           $pluginCount = 0
@@ -628,7 +601,7 @@ jobs:
           Write-Host "  Plugins (lib/gstreamer-1.0/): $totalPlugins"
 
       - name: Bundle macOS App
-        if: matrix.target == 'macos' || matrix.target == 'macos-intel'
+        if: matrix.target == 'macos'
         shell: bash
         env:
           VERSION: ${{ needs.get-version.outputs.version_number }}
@@ -650,18 +623,15 @@ jobs:
           rm -rf "$APP_DIR"
           mkdir -p "$MACOS_DIR" "$FRAMEWORKS_DIR" "$RESOURCES_DIR"
 
-          # Check binary
           if [ ! -f "$BINARY" ]; then
             echo "ERROR: Binary not found at $BINARY"
             exit 1
           fi
 
-          # Copy and rename binary
           echo "Copying binary..."
           cp "$BINARY" "$MACOS_DIR/$APP_NAME"
           chmod +x "$MACOS_DIR/$APP_NAME"
 
-          # Create Info.plist
           echo "Creating Info.plist..."
           cat > "$CONTENTS_DIR/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -690,296 +660,133 @@ jobs:
           </plist>
           EOF
 
-          # Function to copy a library and fix its install name
           copy_lib() {
             local lib="$1"
             local libname=$(basename "$lib")
-
             if [ ! -f "$FRAMEWORKS_DIR/$libname" ] && [ -f "$lib" ]; then
               echo "Copying: $libname"
               cp "$lib" "$FRAMEWORKS_DIR/"
               chmod 755 "$FRAMEWORKS_DIR/$libname"
-
-              # Fix the library's own install name to be relative to the framework folder
               install_name_tool -id "@executable_path/../Frameworks/$libname" "$FRAMEWORKS_DIR/$libname" 2>/dev/null || true
-              return 0
             fi
-            return 0
           }
 
-          # Function to fix references in a binary/library
           fix_refs() {
             local target="$1"
-            # Only fix references to Homebrew/system libs that we are bundling
             for dep in $(otool -L "$target" 2>/dev/null | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
               local depname=$(basename "$dep")
               install_name_tool -change "$dep" "@executable_path/../Frameworks/$depname" "$target" 2>/dev/null || true
             done
           }
 
-          echo ""
-          echo "=== Phase 1a: Explicitly copy GStreamer libraries ==="
-          # GStreamer libraries might not show up in otool if dlopened or linked with @rpath
-          # So we explicitly find and copy them
-
           BREW_PREFIX=$(brew --prefix)
           GST_PREFIX=$(brew --prefix gstreamer)
-          echo "Homebrew prefix: $BREW_PREFIX"
-          echo "GStreamer prefix: $GST_PREFIX"
 
-          # List of core GStreamer libraries to bundle
           GST_LIBS=(
-            "libgstreamer-1.0"
-            "libgstbase-1.0"
-            "libgstapp-1.0"
-            "libgstaudio-1.0"
-            "libgstvideo-1.0"
-            "libgstpbutils-1.0"
-            "libgstrtp-1.0"
-            "libgstcodecs-1.0"
-            "libgstgl-1.0"
-            "libgstcodecparsers-1.0"
-            "libgsttag-1.0"
-            "libgstfft-1.0"
+            "libgstreamer-1.0" "libgstbase-1.0" "libgstapp-1.0" "libgstaudio-1.0"
+            "libgstvideo-1.0" "libgstpbutils-1.0" "libgstrtp-1.0" "libgstcodecs-1.0"
+            "libgstgl-1.0" "libgstcodecparsers-1.0" "libgsttag-1.0" "libgstfft-1.0"
           )
-
-          # GLib dependencies (required by GStreamer)
           GLIB_LIBS=(
-            "libglib-2.0"
-            "libgobject-2.0"
-            "libgmodule-2.0"
-            "libgio-2.0"
-            "libgthread-2.0"
-            "libintl"
-            "libffi"
-            "liborc-0.4"
-            "libpcre2-8"
+            "libglib-2.0" "libgobject-2.0" "libgmodule-2.0" "libgio-2.0"
+            "libgthread-2.0" "libintl" "libffi" "liborc-0.4" "libpcre2-8"
           )
 
-          # Search in both GStreamer prefix and general Homebrew lib
           SEARCH_PATHS=("$GST_PREFIX/lib" "$BREW_PREFIX/lib")
-
           for lib_base in "${GST_LIBS[@]}" "${GLIB_LIBS[@]}"; do
              for search_path in "${SEARCH_PATHS[@]}"; do
                if [ -d "$search_path" ]; then
-                 FOUND_LIBS=$(find "$search_path" -maxdepth 1 -name "${lib_base}*.dylib" -type f 2>/dev/null || true)
-                 for lib in $FOUND_LIBS; do
-                    echo "Found lib: $lib"
+                 for lib in $(find "$search_path" -maxdepth 1 -name "${lib_base}*.dylib" -type f 2>/dev/null); do
                     copy_lib "$lib"
                  done
                fi
              done
           done
 
-          # Copy GStreamer plugins
-          echo ""
-          echo "=== Phase 1b: Copy GStreamer plugins ==="
           GST_PLUGIN_DIR="$GST_PREFIX/lib/gstreamer-1.0"
           BUNDLE_PLUGIN_DIR="$FRAMEWORKS_DIR/gstreamer-1.0"
-          
           if [ -d "$GST_PLUGIN_DIR" ]; then
             mkdir -p "$BUNDLE_PLUGIN_DIR"
-            echo "Copying plugins from $GST_PLUGIN_DIR..."
-            
-            # Essential plugins for video decoding
             ESSENTIAL_PLUGINS=(
-              "libgstapplemedia.dylib"    # VideoToolbox (vtdec)
-              "libgstlibav.dylib"         # Software decoders (avdec_h264, etc.)
-              "libgstvideoparsersbad.dylib" # h264parse, h265parse, av1parse
-              "libgstcoreelements.dylib"  # appsrc, appsink
-              "libgstapp.dylib"           # app elements
-              "libgstvideoconvertscale.dylib" # videoconvert
-              "libgstaudioconvert.dylib"  # audio processing
-              "libgstaudioresample.dylib" # audio resampling
-              "libgstopus.dylib"          # Opus audio codec
-              "libgstaudioparsers.dylib"  # Audio parsers
-              "libgstplayback.dylib"      # playback elements
-              "libgsttypefindfunctions.dylib" # type detection
-              "libgstautodetect.dylib"    # auto detection
-              "libgstvolume.dylib"        # volume control
+              "libgstapplemedia.dylib" "libgstlibav.dylib" "libgstvideoparsersbad.dylib"
+              "libgstcoreelements.dylib" "libgstapp.dylib" "libgstvideoconvertscale.dylib"
+              "libgstaudioconvert.dylib" "libgstaudioresample.dylib" "libgstopus.dylib"
+              "libgstaudioparsers.dylib" "libgstplayback.dylib" "libgsttypefindfunctions.dylib"
+              "libgstautodetect.dylib" "libgstvolume.dylib"
             )
-            
             for plugin in "${ESSENTIAL_PLUGINS[@]}"; do
               if [ -f "$GST_PLUGIN_DIR/$plugin" ]; then
-                echo "Copying plugin: $plugin"
                 cp "$GST_PLUGIN_DIR/$plugin" "$BUNDLE_PLUGIN_DIR/"
               fi
             done
-            
-            PLUGIN_COUNT=$(ls -1 "$BUNDLE_PLUGIN_DIR"/*.dylib 2>/dev/null | wc -l || echo 0)
-            echo "Copied $PLUGIN_COUNT essential plugins"
-          else
-            echo "WARNING: GStreamer plugin directory not found at $GST_PLUGIN_DIR"
           fi
 
-          echo ""
-          echo "=== Phase 2: Copy direct dependencies detected by otool ==="
           DIRECT_DEPS=$(otool -L "$BINARY" 2>/dev/null | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}' || true)
-          if [ -z "$DIRECT_DEPS" ]; then
-            echo "No Homebrew dependencies found via otool (may be statically linked or using system libs)"
-          else
-            for lib in $DIRECT_DEPS; do
-              copy_lib "$lib"
-            done
-          fi
-
-          echo ""
-          echo "=== Phase 3: Copy transitive dependencies (3 passes) ==="
-          BREW_PREFIX=$(brew --prefix)
-          echo "Resolving @rpath against: $BREW_PREFIX/lib"
+          for lib in $DIRECT_DEPS; do copy_lib "$lib"; done
 
           for pass in 1 2 3; do
-            echo "Pass $pass..."
             if ls "$FRAMEWORKS_DIR/"*.dylib 1>/dev/null 2>&1; then
               for bundled_lib in "$FRAMEWORKS_DIR/"*.dylib; do
                 [ -f "$bundled_lib" ] || continue
-                # Grep for /opt/homebrew, /usr/local, AND @rpath
                 for dep in $(otool -L "$bundled_lib" 2>/dev/null | grep -E '/opt/homebrew|/usr/local|@rpath' | awk '{print $1}'); do
-
-                  # Handle @rpath references
                   if [[ "$dep" == "@rpath/"* ]]; then
-                     # Extract filename
                      filename="${dep#@rpath/}"
-                     # Construct absolute path assuming it's in Homebrew lib
                      resolved_path="$BREW_PREFIX/lib/$filename"
-
-                     if [ -f "$resolved_path" ]; then
-                         # echo "Resolved $dep to $resolved_path"
-                         copy_lib "$resolved_path"
-                     fi
+                     [ -f "$resolved_path" ] && copy_lib "$resolved_path"
                   else
-                     # Absolute path
                      copy_lib "$dep"
                   fi
                 done
               done
-            else
-              echo "  No dylibs to process"
-              break
             fi
           done
 
-          echo ""
-          echo "=== Phase 4: Fix all library references ==="
-          # Fix the main binary
           fix_refs "$MACOS_DIR/$APP_NAME"
-
-          # Fix all bundled libraries in Frameworks
-          if ls "$FRAMEWORKS_DIR/"*.dylib 1>/dev/null 2>&1; then
-            for bundled_lib in "$FRAMEWORKS_DIR/"*.dylib; do
-              [ -f "$bundled_lib" ] || continue
-              fix_refs "$bundled_lib"
-            done
-          fi
+          for bundled_lib in "$FRAMEWORKS_DIR/"*.dylib; do
+            [ -f "$bundled_lib" ] && fix_refs "$bundled_lib"
+          done
           
-          # Fix bundled GStreamer plugins
           if ls "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib 1>/dev/null 2>&1; then
             for bundled_lib in "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib; do
-              [ -f "$bundled_lib" ] || continue
-              # Fix references to Homebrew libs
               for dep in $(otool -L "$bundled_lib" 2>/dev/null | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
                 depname=$(basename "$dep")
-                if [ -f "$FRAMEWORKS_DIR/$depname" ]; then
-                  install_name_tool -change "$dep" "@executable_path/../Frameworks/$depname" "$bundled_lib" 2>/dev/null || true
-                fi
+                [ -f "$FRAMEWORKS_DIR/$depname" ] && install_name_tool -change "$dep" "@executable_path/../Frameworks/$depname" "$bundled_lib" 2>/dev/null || true
               done
             done
           fi
 
-          # Special pass: Fix GStreamer internal references
-          echo "Fixing internal references in bundled libs..."
-          if ls "$FRAMEWORKS_DIR/"*.dylib 1>/dev/null 2>&1; then
-            for bundled_lib in "$FRAMEWORKS_DIR/"*.dylib; do
-               # For each bundled lib, check if it references other bundled libs via absolute path
-               # and rewrite those to @loader_path
-               for dep in $(otool -L "$bundled_lib" 2>/dev/null | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
-                  depname=$(basename "$dep")
-                  if [ -f "$FRAMEWORKS_DIR/$depname" ]; then
-                      echo "  Fixing ref in $(basename "$bundled_lib") to $depname"
-                      install_name_tool -change "$dep" "@loader_path/$depname" "$bundled_lib" 2>/dev/null || true
-                  fi
-               done
-            done
-          fi
-
-          # Special pass: Rewrite @rpath references
-          echo "Rewriting @rpath references in bundled libs..."
-          if ls "$FRAMEWORKS_DIR/"*.dylib 1>/dev/null 2>&1; then
-            for bundled_lib in "$FRAMEWORKS_DIR/"*.dylib; do
-               # Grep for @rpath references
-               for dep in $(otool -L "$bundled_lib" 2>/dev/null | grep "@rpath/" | awk '{print $1}'); do
-                  filename="${dep#@rpath/}"
-                  if [ -f "$FRAMEWORKS_DIR/$filename" ]; then
-                      echo "  Rewriting @rpath ref in $(basename "$bundled_lib"): $dep -> @loader_path/$filename"
-                      install_name_tool -change "$dep" "@loader_path/$filename" "$bundled_lib" 2>/dev/null || true
-                  fi
-               done
-            done
-          fi
+          for bundled_lib in "$FRAMEWORKS_DIR/"*.dylib; do
+             for dep in $(otool -L "$bundled_lib" 2>/dev/null | grep -E '/opt/homebrew|/usr/local' | awk '{print $1}'); do
+                depname=$(basename "$dep")
+                [ -f "$FRAMEWORKS_DIR/$depname" ] && install_name_tool -change "$dep" "@loader_path/$depname" "$bundled_lib" 2>/dev/null || true
+             done
+             for dep in $(otool -L "$bundled_lib" 2>/dev/null | grep "@rpath/" | awk '{print $1}'); do
+                filename="${dep#@rpath/}"
+                [ -f "$FRAMEWORKS_DIR/$filename" ] && install_name_tool -change "$dep" "@loader_path/$filename" "$bundled_lib" 2>/dev/null || true
+             done
+          done
           
-          # Fix @rpath in GStreamer plugins too
           if ls "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib 1>/dev/null 2>&1; then
             for bundled_lib in "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib; do
                for dep in $(otool -L "$bundled_lib" 2>/dev/null | grep "@rpath/" | awk '{print $1}'); do
                   filename="${dep#@rpath/}"
-                  if [ -f "$FRAMEWORKS_DIR/$filename" ]; then
-                      install_name_tool -change "$dep" "@executable_path/../Frameworks/$filename" "$bundled_lib" 2>/dev/null || true
-                  fi
+                  [ -f "$FRAMEWORKS_DIR/$filename" ] && install_name_tool -change "$dep" "@executable_path/../Frameworks/$filename" "$bundled_lib" 2>/dev/null || true
                done
             done
           fi
 
-          echo ""
-          echo "=== Final verification ==="
-          echo "Binary dependencies:"
-          otool -L "$MACOS_DIR/$APP_NAME"
-
-          echo ""
-          echo "Bundled Frameworks:"
-          ls -1 "$FRAMEWORKS_DIR"
-
-          echo ""
-          echo "Verifying no remaining Homebrew paths..."
-          if otool -L "$MACOS_DIR/$APP_NAME" | grep -E '/opt/homebrew|/usr/local'; then
-            echo "WARNING: Some Homebrew paths remain (may be system libs)"
-          else
-            echo "All Homebrew dependencies bundled!"
-          fi
-
-          echo ""
-          echo "=== Phase 5: Code Signing ==="
-          echo "Signing app bundle..."
-
-          # Sign all dylibs in Frameworks
-          echo "Signing framework libraries..."
           for lib in "$FRAMEWORKS_DIR/"*.dylib; do
-            if [ -f "$lib" ]; then
-              codesign --force --sign - "$lib" 2>/dev/null || true
-            fi
+            [ -f "$lib" ] && codesign --force --sign - "$lib" 2>/dev/null || true
           done
-          
-          # Sign GStreamer plugins
-          echo "Signing GStreamer plugins..."
           if ls "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib 1>/dev/null 2>&1; then
             for lib in "$FRAMEWORKS_DIR/gstreamer-1.0/"*.dylib; do
-              if [ -f "$lib" ]; then
-                codesign --force --sign - "$lib" 2>/dev/null || true
-              fi
+              [ -f "$lib" ] && codesign --force --sign - "$lib" 2>/dev/null || true
             done
           fi
-
-          # Sign the main binary
-          echo "Signing main binary..."
           codesign --force --sign - "$MACOS_DIR/$APP_NAME" 2>/dev/null || true
-
-          # Finally sign the whole app bundle
-          echo "Signing app bundle..."
           codesign --force --sign - "$APP_DIR"
 
-          # Zip the app bundle for upload/release
-          echo "Zipping .app bundle..."
           cd target/release
-          # Use architecture from matrix (arm64 or x86_64)
           ZIP_NAME="OpenNOW-macos-${ARCH}.zip"
           zip -r "$ZIP_NAME" "$APP_NAME.app"
           echo "Created: $ZIP_NAME"
@@ -989,24 +796,15 @@ jobs:
         shell: bash
         run: |
           cd opennow-streamer
-
-          # Native ARM64 build - binary is in target/release (not target/aarch64-unknown-linux-gnu/release)
           BINARY="target/release/opennow-streamer"
           BUNDLE_DIR="target/release/bundle"
           LIB_DIR="$BUNDLE_DIR/lib"
           GST_PLUGIN_DIR="$BUNDLE_DIR/lib/gstreamer-1.0"
 
-          echo "Creating bundle directory structure..."
           mkdir -p "$BUNDLE_DIR" "$LIB_DIR" "$GST_PLUGIN_DIR"
-
-          # Copy the binary
           cp "$BINARY" "$BUNDLE_DIR/"
           chmod +x "$BUNDLE_DIR/opennow-streamer"
 
-          # Copy GStreamer libraries for ARM64
-          echo "Bundling GStreamer libraries..."
-
-          # Core GStreamer libraries and their dependencies
           for lib in /usr/lib/aarch64-linux-gnu/libgstreamer-1.0.so* \
                      /usr/lib/aarch64-linux-gnu/libgstbase-1.0.so* \
                      /usr/lib/aarch64-linux-gnu/libgstapp-1.0.so* \
@@ -1024,32 +822,19 @@ jobs:
                      /usr/lib/aarch64-linux-gnu/libpcre.so* \
                      /usr/lib/aarch64-linux-gnu/libpcre2-8.so* \
                      /usr/lib/aarch64-linux-gnu/libffi.so*; do
-            if [ -f "$lib" ]; then
-              cp -L "$lib" "$LIB_DIR/" 2>/dev/null || true
-            fi
+            [ -f "$lib" ] && cp -L "$lib" "$LIB_DIR/" 2>/dev/null || true
           done
 
-          # Copy GStreamer plugins
-          echo "Bundling GStreamer plugins..."
-          if [ -d "/usr/lib/aarch64-linux-gnu/gstreamer-1.0" ]; then
-            cp -L /usr/lib/aarch64-linux-gnu/gstreamer-1.0/*.so "$GST_PLUGIN_DIR/" 2>/dev/null || true
-          fi
+          [ -d "/usr/lib/aarch64-linux-gnu/gstreamer-1.0" ] && cp -L /usr/lib/aarch64-linux-gnu/gstreamer-1.0/*.so "$GST_PLUGIN_DIR/" 2>/dev/null || true
 
-          # Count bundled files
-          LIB_COUNT=$(ls -1 "$LIB_DIR"/*.so* 2>/dev/null | wc -l || echo 0)
-          PLUGIN_COUNT=$(ls -1 "$GST_PLUGIN_DIR"/*.so 2>/dev/null | wc -l || echo 0)
-          echo "Bundled $LIB_COUNT libraries and $PLUGIN_COUNT plugins"
-
-          # Create wrapper script that sets library paths
-          echo '#!/bin/bash' > "$BUNDLE_DIR/run.sh"
-          echo 'SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' >> "$BUNDLE_DIR/run.sh"
-          echo 'export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"' >> "$BUNDLE_DIR/run.sh"
-          echo 'export GST_REGISTRY_UPDATE=yes' >> "$BUNDLE_DIR/run.sh"
-          echo 'exec "$SCRIPT_DIR/opennow-streamer" "$@"' >> "$BUNDLE_DIR/run.sh"
+          cat > "$BUNDLE_DIR/run.sh" <<'RUNEOF'
+          #!/bin/bash
+          SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          export LD_LIBRARY_PATH="$SCRIPT_DIR/lib:$LD_LIBRARY_PATH"
+          export GST_REGISTRY_UPDATE=yes
+          exec "$SCRIPT_DIR/opennow-streamer" "$@"
+          RUNEOF
           chmod +x "$BUNDLE_DIR/run.sh"
-
-          echo ""
-          echo "Bundle created at: $BUNDLE_DIR"
 
       # ==================== Upload Artifacts ====================
 
@@ -1059,16 +844,9 @@ jobs:
         run: |
           $releaseDir = "opennow-streamer/target/release"
           $zipName = "OpenNOW-windows-x64.zip"
-          # Include exe, all DLLs (GStreamer core), and lib folder (GStreamer plugins)
-          $items = @(
-            "$releaseDir\opennow-streamer.exe"
-          )
-          # Add all DLLs (GStreamer core libraries next to exe)
+          $items = @("$releaseDir\opennow-streamer.exe")
           $items += Get-ChildItem "$releaseDir\*.dll" | ForEach-Object { $_.FullName }
-          # Add lib folder if it exists (contains GStreamer plugins)
-          if (Test-Path "$releaseDir\lib") {
-            $items += "$releaseDir\lib"
-          }
+          if (Test-Path "$releaseDir\lib") { $items += "$releaseDir\lib" }
           Compress-Archive -Path $items -DestinationPath "$releaseDir\$zipName"
 
       - name: Upload Windows x64 artifacts
@@ -1085,16 +863,9 @@ jobs:
         run: |
           $releaseDir = "opennow-streamer/target/aarch64-pc-windows-msvc/release"
           $zipName = "OpenNOW-windows-arm64.zip"
-          # Include exe, all DLLs (GStreamer core), and lib folder (GStreamer plugins)
-          $items = @(
-            "$releaseDir\opennow-streamer.exe"
-          )
-          # Add all DLLs (GStreamer core libraries next to exe)
+          $items = @("$releaseDir\opennow-streamer.exe")
           $items += Get-ChildItem "$releaseDir\*.dll" | ForEach-Object { $_.FullName }
-          # Add lib folder if it exists (contains GStreamer plugins)
-          if (Test-Path "$releaseDir\lib") {
-            $items += "$releaseDir\lib"
-          }
+          if (Test-Path "$releaseDir\lib") { $items += "$releaseDir\lib" }
           Compress-Archive -Path $items -DestinationPath "$releaseDir\$zipName"
 
       - name: Upload Windows ARM64 artifacts
@@ -1112,15 +883,6 @@ jobs:
           name: opennow-streamer-${{ needs.get-version.outputs.version }}-macos-arm64
           path: opennow-streamer/target/release/OpenNOW-macos-arm64.zip
           retention-days: 30
-
-      # NOTE: Legacy macOS Intel build temporarily disabled - macOS-13 runners retired
-      # - name: Upload macOS Intel (Legacy) artifacts
-      #   if: matrix.target == 'macos-intel'
-      #   uses: actions/upload-artifact@v4
-      #   with:
-      #     name: opennow-streamer-${{ needs.get-version.outputs.version }}-macos-intel
-      #     path: opennow-streamer/target/release/OpenNOW-macos-x86_64.zip
-      #     retention-days: 30
 
       - name: Install AppImage tooling (Linux x64)
         if: matrix.target == 'linux'
@@ -1145,10 +907,7 @@ jobs:
           appimage-builder --recipe AppImageBuilder.yml --skip-test
           mkdir -p opennow-streamer/target/release
           APPIMAGE_PATH=$(ls -1 *.AppImage | head -1)
-          if [ -z "$APPIMAGE_PATH" ]; then
-            echo "AppImage output not found"
-            exit 1
-          fi
+          [ -z "$APPIMAGE_PATH" ] && { echo "AppImage output not found"; exit 1; }
           mv "$APPIMAGE_PATH" opennow-streamer/target/release/OpenNOW-linux-x64.AppImage
 
       - name: Upload Linux x64 artifacts
@@ -1163,7 +922,6 @@ jobs:
         if: matrix.target == 'linux-arm64'
         shell: bash
         run: |
-          # Native ARM64 build - binary is in target/release (not target/aarch64-unknown-linux-gnu/release)
           cd opennow-streamer/target/release
           zip -r "OpenNOW-linux-arm64.zip" bundle/
 
@@ -1197,29 +955,7 @@ jobs:
             - **Windows ARM64**: Portable executable with bundled GStreamer (Surface Pro X, etc.)
             - **macOS ARM64**: Apple Silicon native binary with bundled GStreamer (Intel Macs can use Rosetta 2)
             - **Linux x64**: AppImage with bundled GStreamer
-            - **Linux ARM64**: Portable binary (requires system GStreamer - see below)
-
-            ### Quick Install (Linux/macOS)
-            
-            **One-line installer** (installs GStreamer dependencies and downloads OpenNOW):
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/zortos293/OpenNOW/main/scripts/install.sh | bash
-            ```
-
-            **Manual GStreamer installation**:
-            ```bash
-            # macOS (Homebrew)
-            brew install gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav
-
-            # Ubuntu/Debian
-            sudo apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-plugins-ugly gstreamer1.0-libav
-
-            # Fedora/RHEL
-            sudo dnf install gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free gstreamer1-libav
-
-            # Arch
-            sudo pacman -S gstreamer gst-plugins-base gst-plugins-good gst-plugins-bad gst-plugins-ugly gst-libav
-            ```
+            - **Linux ARM64**: Portable binary (requires system GStreamer)
 
             [Sponsor this project](https://github.com/sponsors/zortos293)
           draft: false
@@ -1257,17 +993,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # NOTE: Legacy macOS Intel build temporarily disabled - macOS-13 runners retired
-      # - name: Upload macOS Intel (Legacy) to release
-      #   if: matrix.target == 'macos-intel' && github.ref == 'refs/heads/main'
-      #   uses: softprops/action-gh-release@v1
-      #   with:
-      #     tag_name: ${{ needs.get-version.outputs.version }}
-      #     files: opennow-streamer/target/release/OpenNOW-macos-x86_64.zip
-      #     fail_on_unmatched_files: false
-      #   env:
-      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Upload Linux x64 to release
         if: matrix.target == 'linux' && github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v1
@@ -1283,7 +1008,6 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ needs.get-version.outputs.version }}
-          # Native ARM64 build - binary is in target/release (not target/aarch64-unknown-linux-gnu/release)
           files: opennow-streamer/target/release/OpenNOW-linux-arm64.zip
           fail_on_unmatched_files: false
         env:
