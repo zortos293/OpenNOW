@@ -14,6 +14,9 @@ pub struct Settings {
     /// Stream quality preset
     pub quality: StreamQuality,
 
+    /// Aspect ratio for resolution filtering
+    pub aspect_ratio: AspectRatio,
+
     /// Custom resolution (e.g., "1920x1080")
     pub resolution: String,
 
@@ -108,6 +111,7 @@ impl Default for Settings {
         Self {
             // Video
             quality: StreamQuality::Auto,
+            aspect_ratio: AspectRatio::Ratio16x9,
             resolution: "1920x1080".to_string(),
             fps: 60,
             codec: VideoCodec::H264,
@@ -280,7 +284,89 @@ impl StreamQuality {
     }
 }
 
-/// Available resolutions
+/// Aspect ratio options for resolution filtering
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum AspectRatio {
+    /// 16:9 - Standard widescreen
+    #[default]
+    Ratio16x9,
+    /// 21:9 - Ultrawide
+    Ratio21x9,
+    /// 32:9 - Super ultrawide
+    Ratio32x9,
+    /// 16:10 - Classic widescreen
+    Ratio16x10,
+    /// 4:3 - Legacy
+    Ratio4x3,
+}
+
+impl AspectRatio {
+    /// Get display name for UI
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            AspectRatio::Ratio16x9 => "16:9 (Standard)",
+            AspectRatio::Ratio21x9 => "21:9 (Ultrawide)",
+            AspectRatio::Ratio32x9 => "32:9 (Super Ultrawide)",
+            AspectRatio::Ratio16x10 => "16:10",
+            AspectRatio::Ratio4x3 => "4:3 (Legacy)",
+        }
+    }
+
+    /// Get all available aspect ratios
+    pub fn all() -> &'static [AspectRatio] {
+        &[
+            AspectRatio::Ratio16x9,
+            AspectRatio::Ratio21x9,
+            AspectRatio::Ratio32x9,
+            AspectRatio::Ratio16x10,
+            AspectRatio::Ratio4x3,
+        ]
+    }
+
+    /// Get resolutions for this aspect ratio
+    pub fn resolutions(&self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            AspectRatio::Ratio16x9 => &[
+                ("1280x720", "720p HD"),
+                ("1600x900", "900p"),
+                ("1920x1080", "1080p Full HD"),
+                ("2560x1440", "1440p QHD"),
+                ("3840x2160", "4K UHD"),
+                ("5120x2880", "5K"),
+                ("7680x4320", "8K"),
+            ],
+            AspectRatio::Ratio21x9 => &[
+                ("2560x1080", "1080p Ultrawide"),
+                ("3440x1440", "1440p Ultrawide"),
+                ("3840x1600", "1600p Ultrawide"),
+                ("5120x2160", "4K Ultrawide"),
+            ],
+            AspectRatio::Ratio32x9 => &[
+                ("3840x1080", "1080p Super Ultrawide"),
+                ("5120x1440", "1440p Super Ultrawide"),
+                ("7680x2160", "4K Super Ultrawide"),
+            ],
+            AspectRatio::Ratio16x10 => &[
+                ("1280x800", "WXGA"),
+                ("1440x900", "WXGA+"),
+                ("1680x1050", "WSXGA+"),
+                ("1920x1200", "WUXGA"),
+                ("2560x1600", "WQXGA"),
+                ("3840x2400", "4K 16:10"),
+            ],
+            AspectRatio::Ratio4x3 => &[
+                ("1024x768", "XGA"),
+                ("1280x960", "SXGA-"),
+                ("1400x1050", "SXGA+"),
+                ("1600x1200", "UXGA"),
+                ("2048x1536", "QXGA"),
+            ],
+        }
+    }
+}
+
+/// Available resolutions (legacy - all resolutions combined)
 pub const RESOLUTIONS: &[(&str, &str)] = &[
     ("1280x720", "720p"),
     ("1920x1080", "1080p"),

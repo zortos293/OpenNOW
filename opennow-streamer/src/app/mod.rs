@@ -7,7 +7,7 @@ pub mod config;
 pub mod session;
 pub mod types;
 
-pub use config::{AudioCodec, ColorQuality, Settings, StatsPosition, StreamQuality, VideoCodec};
+pub use config::{AspectRatio, AudioCodec, ColorQuality, Settings, StatsPosition, StreamQuality, VideoCodec};
 pub use session::{ActiveSessionInfo, SessionInfo, SessionState};
 pub use types::{
     parse_resolution, AppState, GameInfo, GameSection, GameVariant, GamesTab, QueueRegionFilter,
@@ -257,6 +257,18 @@ impl App {
             auth::set_login_provider(provider);
         }
 
+        // Extract user info from cached tokens
+        let user_info = if has_token {
+            auth_tokens
+                .as_ref()
+                .and_then(|tokens| auth::decode_jwt_user_info(tokens.jwt()).ok())
+        } else {
+            None
+        };
+        if let Some(ref info) = user_info {
+            info!("Loaded user info from cached token: {}", info.display_name);
+        }
+
         let initial_state = if has_token {
             AppState::Games
         } else {
@@ -320,7 +332,7 @@ impl App {
             runtime,
             settings,
             auth_tokens,
-            user_info: None,
+            user_info,
             session: None,
             streaming_session: None,
             input_handler: None,
@@ -468,6 +480,13 @@ impl App {
             }
             UiAction::UpdateSetting(change) => {
                 match change {
+                    SettingChange::AspectRatio(ratio) => {
+                        self.settings.aspect_ratio = ratio;
+                        // When aspect ratio changes, set resolution to first available for that ratio
+                        if let Some((res, _)) = ratio.resolutions().first() {
+                            self.settings.resolution = res.to_string();
+                        }
+                    }
                     SettingChange::Resolution(res) => self.settings.resolution = res,
                     SettingChange::Fps(fps) => self.settings.fps = fps,
                     SettingChange::Codec(codec) => {
@@ -948,6 +967,15 @@ impl App {
                     self.login_url = None; // Clear login URL after successful login
                     self.state = AppState::Games;
                     self.status_message = "Login successful!".to_string();
+                    
+                    // Fetch user info from JWT token
+                    if let Ok(user_info) = auth::decode_jwt_user_info(tokens.jwt()) {
+                        info!("User logged in: {}", user_info.display_name);
+                        self.user_info = Some(user_info);
+                    } else {
+                        warn!("Failed to decode user info from JWT");
+                    }
+                    
                     self.fetch_games();
                     self.fetch_sections(); // Fetch sections for Home tab
                     self.fetch_subscription(); // Also fetch subscription info

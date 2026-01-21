@@ -589,6 +589,8 @@ impl ApplicationHandler<UserEvent> for OpenNowApp {
                 let show_stats = app_guard.show_stats;
                 let stats = app_guard.stats.clone();
                 let decoder_backend = app_guard.active_decoder_backend.clone();
+                let login_providers = app_guard.login_providers.clone();
+                let selected_provider_index = app_guard.selected_provider_index;
                 
                 // Take collected iced events
                 let events: Vec<IcedEvent> = std::mem::take(&mut self.iced_events);
@@ -617,6 +619,8 @@ impl ApplicationHandler<UserEvent> for OpenNowApp {
                     show_stats,
                     &stats,
                     &decoder_backend,
+                    &login_providers,
+                    selected_provider_index,
                 ) {
                     Ok(actions) => {
                         // Apply UI actions to app state

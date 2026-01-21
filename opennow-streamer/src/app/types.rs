@@ -6,7 +6,7 @@ use parking_lot::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use winit::event_loop::EventLoopProxy;
 
-use super::config::{ColorQuality, GameLanguage, VideoCodec, VideoDecoderBackend};
+use super::config::{AspectRatio, ColorQuality, GameLanguage, VideoCodec, VideoDecoderBackend};
 use crate::media::VideoFrame;
 
 /// Custom user events for cross-thread communication
@@ -323,6 +323,7 @@ pub enum UiAction {
 /// Setting changes
 #[derive(Debug, Clone)]
 pub enum SettingChange {
+    AspectRatio(AspectRatio),
     Resolution(String),
     Fps(u32),
     Codec(VideoCodec),

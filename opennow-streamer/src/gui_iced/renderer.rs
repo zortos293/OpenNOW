@@ -863,6 +863,8 @@ impl Renderer {
         show_stats: bool,
         stats: &crate::media::StreamStats,
         decoder_backend: &str,
+        login_providers: &[crate::auth::LoginProvider],
+        selected_provider_index: usize,
     ) -> Result<Vec<UiAction>> {
         let mut ui_actions = Vec::new();
         
@@ -1040,6 +1042,8 @@ impl Renderer {
                     servers,
                     selected_server_index,
                     subscription,
+                    login_providers,
+                    selected_provider_index,
                 ),
                 self.viewport.logical_size(),
                 std::mem::take(&mut self.cache),

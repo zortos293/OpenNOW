@@ -5,9 +5,9 @@
 use iced_wgpu::Renderer;
 use iced_widget::{
     button, column, container, image, row, scrollable, text, text_input, slider, Space,
-    checkbox, pick_list,
+    checkbox, pick_list, stack,
 };
-use iced_winit::core::{Alignment, Color, Element, Length, Padding, Theme, Font};
+use iced_winit::core::{Alignment, Color, Element, Length, Padding, Theme, Font, Background, Gradient};
 use super::icons;
 
 /// Safely truncate a string to at most `max_chars` characters.
@@ -25,11 +25,12 @@ fn truncate_string(s: &str, max_chars: usize) -> &str {
 }
 
 use crate::app::{
-    AppState, GameInfo, GameSection, GamesTab, ServerInfo, Settings, SettingChange,
+    AspectRatio, AppState, GameInfo, GameSection, GamesTab, ServerInfo, Settings, SettingChange,
     SubscriptionInfo, UiAction,
 };
+use crate::auth::LoginProvider;
 use crate::app::config::{
-    FPS_OPTIONS, RESOLUTIONS, VideoCodec, VideoDecoderBackend, ColorQuality, GameLanguage,
+    FPS_OPTIONS, VideoCodec, VideoDecoderBackend, ColorQuality, GameLanguage,
 };
 
 /// Get platform-specific decoder options
@@ -90,6 +91,7 @@ pub enum Message {
     OpenSettings,
     CloseSettings,
     BitrateChanged(f32),
+    AspectRatioChanged(String),
     ResolutionChanged(String),
     FpsChanged(u32),
     CodecChanged(String),
@@ -270,6 +272,19 @@ impl Controls {
                 self.settings.max_bitrate_mbps = value as u32;
                 Some(UiAction::UpdateSetting(SettingChange::MaxBitrate(value as u32)))
             }
+            Message::AspectRatioChanged(ratio_str) => {
+                let ratio = AspectRatio::all()
+                    .iter()
+                    .find(|r| r.display_name() == ratio_str)
+                    .copied()
+                    .unwrap_or(AspectRatio::Ratio16x9);
+                self.settings.aspect_ratio = ratio;
+                // Also update resolution to first available for this aspect ratio
+                if let Some((res, _)) = ratio.resolutions().first() {
+                    self.settings.resolution = res.to_string();
+                }
+                Some(UiAction::UpdateSetting(SettingChange::AspectRatio(ratio)))
+            }
             Message::ResolutionChanged(res) => {
                 self.settings.resolution = res.clone();
                 Some(UiAction::UpdateSetting(SettingChange::Resolution(res)))
@@ -438,9 +453,11 @@ impl Controls {
         servers: &'a [ServerInfo],
         selected_server_index: usize,
         subscription: Option<&'a SubscriptionInfo>,
+        login_providers: &'a [LoginProvider],
+        selected_provider_index: usize,
     ) -> Element<'a, Message, Theme, Renderer> {
         let main_content: Element<'a, Message, Theme, Renderer> = match app_state {
-            AppState::Login => self.view_login(status_message),
+            AppState::Login => self.view_login(status_message, login_providers, selected_provider_index),
             AppState::Games => self.view_games(games, library_games, game_sections, user_name, subscription, servers, selected_server_index),
             AppState::Session => self.view_session(status_message),
             AppState::Streaming => {
@@ -462,7 +479,12 @@ impl Controls {
         }
     }
     
-    fn view_login<'a>(&'a self, status_message: &'a str) -> Element<'a, Message, Theme, Renderer> {
+    fn view_login<'a>(
+        &'a self,
+        status_message: &'a str,
+        login_providers: &'a [LoginProvider],
+        selected_provider_index: usize,
+    ) -> Element<'a, Message, Theme, Renderer> {
         let title = text("OpenNOW")
             .size(48)
             .color(Color::from_rgb(0.467, 0.784, 0.196)); // GFN green
@@ -471,12 +493,75 @@ impl Controls {
             .size(16)
             .color(Color::from_rgb(0.7, 0.7, 0.7));
         
-        let nvidia_btn = button(
-            container(text("Sign in with NVIDIA").size(16))
+        // Provider selection dropdown
+        let provider_names: Vec<String> = login_providers
+            .iter()
+            .map(|p| p.login_provider_display_name.clone())
+            .collect();
+        
+        let selected_provider_name = login_providers
+            .get(selected_provider_index)
+            .map(|p| p.login_provider_display_name.clone());
+        
+        let provider_label = text("Alliance Partner")
+            .size(14)
+            .color(Color::from_rgb(0.7, 0.7, 0.7));
+        
+        let provider_picker: Element<'a, Message, Theme, Renderer> = if provider_names.len() > 1 {
+            pick_list(
+                provider_names,
+                selected_provider_name,
+                |name| {
+                    // Find the index of the selected provider
+                    Message::SelectProvider(
+                        login_providers
+                            .iter()
+                            .position(|p| p.login_provider_display_name == name)
+                            .unwrap_or(0)
+                    )
+                },
+            )
+            .width(250)
+            .text_size(14)
+            .padding(Padding::from([10, 16]))
+            .style(|_theme: &Theme, _status| {
+                pick_list::Style {
+                    background: Color::from_rgb(0.137, 0.137, 0.176).into(),
+                    text_color: Color::WHITE,
+                    placeholder_color: Color::from_rgb(0.5, 0.5, 0.5),
+                    handle_color: Color::from_rgb(0.467, 0.784, 0.196),
+                    border: iced_core::Border::default()
+                        .rounded(8)
+                        .color(Color::from_rgb(0.235, 0.235, 0.294))
+                        .width(1.0),
+                }
+            })
+            .into()
+        } else {
+            // Show loading text while providers are being fetched
+            text("Loading providers...")
+                .size(14)
+                .color(Color::from_rgb(0.5, 0.5, 0.5))
+                .into()
+        };
+        
+        // Get the button text based on selected provider
+        let selected_provider = login_providers.get(selected_provider_index);
+        let button_text = if let Some(provider) = selected_provider {
+            if provider.is_alliance_partner() {
+                format!("Sign in with {}", provider.login_provider_display_name)
+            } else {
+                "Sign in with NVIDIA".to_string()
+            }
+        } else {
+            "Sign in with NVIDIA".to_string()
+        };
+        
+        let sign_in_btn = button(
+            container(text(button_text).size(16))
                 .padding(Padding::from([12, 32]))
         )
-        .style(|theme: &Theme, status| {
-            let palette = theme.palette();
+        .style(|_theme: &Theme, _status| {
             button::Style {
                 background: Some(Color::from_rgb(0.467, 0.784, 0.196).into()),
                 text_color: Color::BLACK,
@@ -510,7 +595,11 @@ impl Controls {
             Space::new().height(8),
             subtitle,
             Space::new().height(48),
-            nvidia_btn,
+            provider_label,
+            Space::new().height(8),
+            provider_picker,
+            Space::new().height(24),
+            sign_in_btn,
             Space::new().height(32),
             status,
             error,
@@ -544,11 +633,17 @@ impl Controls {
         let header = self.view_header_with_tabs(user_name);
         
         // Content based on tab - use correct games list for each tab
-        let content: Element<'a, Message, Theme, Renderer> = match self.current_tab {
-            GamesTab::Home => self.view_home_sections(game_sections),
-            GamesTab::AllGames => self.view_games_grid(games),
-            GamesTab::MyLibrary => self.view_games_grid(library_games),
-            GamesTab::QueueTimes => self.view_queue_times(),
+        // If search query is active, show filtered results from all games
+        let content: Element<'a, Message, Theme, Renderer> = if !self.search_query.is_empty() {
+            // Search is active - show filtered results from all games
+            self.view_games_grid(games)
+        } else {
+            match self.current_tab {
+                GamesTab::Home => self.view_home_sections(game_sections),
+                GamesTab::AllGames => self.view_games_grid(games),
+                GamesTab::MyLibrary => self.view_games_grid(library_games),
+                GamesTab::QueueTimes => self.view_queue_times(),
+            }
         };
         
         // Bottom bar with subscription info
@@ -644,19 +739,15 @@ impl Controls {
         
         let tabs = row![home_btn, all_btn, library_btn, queue_btn].spacing(4).align_y(Alignment::Center);
         
-        // Search box with text icon - centered in search bar
-        let search_icon = container(
-            text(icons::SEARCH).size(14).color(Color::from_rgb(0.5, 0.5, 0.5))
-        )
-        .width(20)
-        .height(20)
-        .center_x(Length::Fill)
-        .center_y(Length::Fill);
+        // Search box - use simple text character instead of emoji for consistent sizing
+        let search_icon = text("\u{2315}") // ⌕ APL functional symbol circle stile (simple magnifying glass)
+            .size(14)
+            .color(Color::from_rgb(0.5, 0.5, 0.5));
 
         let search_input = text_input("Search games...", &self.search_query)
             .on_input(Message::SearchChanged)
             .on_submit(Message::SearchSubmit)
-            .padding(0) // Remove padding from input itself, handled by container
+            .padding(Padding::from([8, 0])) // Vertical padding for text alignment
             .width(Length::Fill)
             .style(|_theme: &Theme, _status| {
                 text_input::Style {
@@ -685,6 +776,10 @@ impl Controls {
             border: iced_core::Border::default().rounded(18).color(Color::from_rgb(0.235, 0.235, 0.294)).width(1.0),
             ..container::Style::default()
         });
+        
+        // Wrap search bar with vertical padding so it doesn't touch navbar edges
+        let search_bar_padded = container(search_bar)
+            .padding(Padding::from([12, 0])); // 12px top and bottom padding
         
         // User display name
         let user_text = text(user_name.unwrap_or("User"))
@@ -744,7 +839,7 @@ impl Controls {
             Space::new().width(32),
             tabs,
             Space::new().width(Length::Fill), // Left flex space
-            search_bar,
+            search_bar_padded,
             Space::new().width(Length::Fill), // Right flex space
             user_text,
             Space::new().width(12),
@@ -949,9 +1044,9 @@ impl Controls {
     }
     
     fn view_games_row<'a>(&'a self, games: &'a [GameInfo]) -> Element<'a, Message, Theme, Renderer> {
-        let mut row_content = row![].spacing(16);
+        let mut row_content = row![].spacing(20);
         
-        for game in games.iter().take(10) {
+        for game in games.iter().take(12) {
             row_content = row_content.push(self.view_game_card(game));
         }
         
@@ -999,6 +1094,8 @@ impl Controls {
         
         let mut rows: Vec<Element<'a, Message, Theme, Renderer>> = Vec::new();
         
+        // Use 6 columns for 185px cards with 20px spacing
+        // 6 * 185 + 5 * 20 = 1210px content width (fits most screens)
         for chunk in filtered.chunks(6) {
             let mut row_items: Vec<Element<'a, Message, Theme, Renderer>> = Vec::new();
             
@@ -1008,143 +1105,149 @@ impl Controls {
             
             // Fill remaining slots with fixed-width spaces to maintain grid alignment
             while row_items.len() < 6 {
-                row_items.push(Space::new().width(180).height(290).into());
+                row_items.push(Space::new().width(185).height(320).into());
             }
             
             rows.push(
                 iced_widget::Row::with_children(row_items)
-                    .spacing(16)
+                    .spacing(20)
                     .into()
             );
         }
         
         iced_widget::Column::with_children(rows)
-            .spacing(16)
-            .padding(16)
+            .spacing(24)
+            .padding(24)
             .into()
     }
     
     fn view_game_card<'a>(&'a self, game: &'a GameInfo) -> Element<'a, Message, Theme, Renderer> {
         let game_clone = game.clone();
         
-        // Card background color - more visible against dark background
-        let card_bg = Color::from_rgb(0.157, 0.157, 0.196); // rgb(40, 40, 50) - lighter than bg
-        let card_border = Color::from_rgb(0.235, 0.235, 0.275); // rgb(60, 60, 70)
+        // Modern card dimensions - 2:3 aspect ratio like game covers
+        let card_width = 185;
+        let card_height = 260;
         
-        // Fixed card width for consistent layout in both grid and horizontal scroll
-        let card_width = 180;
-        let card_height = 240;
+        // Colors
+        let card_bg = Color::from_rgb(0.12, 0.12, 0.15);
+        let card_bg_hover = Color::from_rgb(0.16, 0.16, 0.20);
+        let gfn_green = Color::from_rgb(0.467, 0.784, 0.196);
         
-        // Image or placeholder
-        let img: Element<'a, Message, Theme, Renderer> = if let Some(ref url) = game.image_url {
+        // Build image content
+        let img_content: Element<'a, Message, Theme, Renderer> = if let Some(ref url) = game.image_url {
             if let Some(handle) = self.loaded_images.get(url) {
-                container(
-                    image(handle.clone())
-                        .width(card_width)
-                        .height(card_height)
-                        .content_fit(iced_core::ContentFit::Cover)
-                )
-                .width(card_width)
-                .height(card_height)
-                .clip(true)
-                .style(move |_| container::Style {
-                    background: Some(card_bg.into()),
-                    border: iced_core::Border::default().rounded(8).color(card_border).width(1.0),
-                    ..container::Style::default()
-                })
-                .into()
+                // Image loaded - show it
+                image(handle.clone())
+                    .width(Length::Fixed(card_width as f32))
+                    .height(Length::Fixed(card_height as f32))
+                    .content_fit(iced_core::ContentFit::Cover)
+                    .into()
             } else {
-                // Placeholder while loading - show title text
+                // Loading placeholder - show abbreviated title
+                let initials: String = game.title
+                    .split_whitespace()
+                    .take(2)
+                    .filter_map(|w| w.chars().next())
+                    .collect();
+                
                 container(
-                    column![
-                        Space::new().height(Length::FillPortion(1)),
-                        text(truncate_string(&game.title, 25))
-                            .size(11)
-                            .color(Color::from_rgb(0.6, 0.6, 0.6))
-                            .width(Length::Fill)
-                            .align_x(Alignment::Center),
-                        Space::new().height(Length::FillPortion(1)),
-                    ]
-                    .width(Length::Fill)
-                    .align_x(Alignment::Center)
+                    text(if initials.is_empty() { "...".to_string() } else { initials })
+                        .size(36)
+                        .color(Color::from_rgba(1.0, 1.0, 1.0, 0.15))
                 )
-                .width(card_width)
-                .height(card_height)
-                .padding(8)
-                .style(move |_| container::Style {
-                    background: Some(card_bg.into()),
-                    border: iced_core::Border::default().rounded(8).color(card_border).width(1.0),
-                    ..container::Style::default()
-                })
+                .width(Length::Fixed(card_width as f32))
+                .height(Length::Fixed(card_height as f32))
+                .center_x(Length::Fill)
+                .center_y(Length::Fill)
                 .into()
             }
         } else {
-            // No image URL - show placeholder with title
+            // No image URL - show game controller emoji placeholder
             container(
-                column![
-                    Space::new().height(Length::FillPortion(1)),
-                    text(truncate_string(&game.title, 25))
-                        .size(11)
-                        .color(Color::from_rgb(0.6, 0.6, 0.6))
-                        .width(Length::Fill)
-                        .align_x(Alignment::Center),
-                    Space::new().height(Length::FillPortion(1)),
-                ]
-                .width(Length::Fill)
-                .align_x(Alignment::Center)
+                text("\u{1F3AE}") // 🎮 game controller
+                    .size(32)
+                    .color(Color::from_rgba(1.0, 1.0, 1.0, 0.15))
             )
-            .width(card_width)
-            .height(card_height)
-            .padding(8)
-            .style(move |_| container::Style {
-                background: Some(card_bg.into()),
-                border: iced_core::Border::default().rounded(8).color(card_border).width(1.0),
-                ..container::Style::default()
-            })
+            .width(Length::Fixed(card_width as f32))
+            .height(Length::Fixed(card_height as f32))
+            .center_x(Length::Fill)
+            .center_y(Length::Fill)
             .into()
         };
         
-        let title = text(&game.title)
-            .size(12)
-            .color(Color::WHITE)
-            .width(card_width)
-            .height(32); // Fixed height for title to ensure alignment
+        // Wrap image in a clipping container with rounded corners
+        let image_container = container(img_content)
+            .width(Length::Fixed(card_width as f32))
+            .height(Length::Fixed(card_height as f32))
+            .clip(true)
+            .style(move |_| container::Style {
+                background: Some(card_bg.into()),
+                border: iced_core::Border::default().rounded(10),
+                ..container::Style::default()
+            });
         
-        let store = text(&game.store)
-            .size(10)
-            .color(Color::from_rgb(0.5, 0.5, 0.5));
+        // Title with truncation - max ~2 lines worth
+        let title_text = text(truncate_string(&game.title, 32))
+            .size(13)
+            .color(Color::WHITE);
         
-        let card = column![
-            img,
-            Space::new().height(8),
-            title,
-            store,
+        // Store badge - subtle pill style
+        let store_badge = container(
+            text(&game.store)
+                .size(10)
+                .color(Color::from_rgb(0.55, 0.55, 0.55))
+        )
+        .padding(Padding::from([2, 6]))
+        .style(|_| container::Style {
+            background: Some(Color::from_rgba(1.0, 1.0, 1.0, 0.06).into()),
+            border: iced_core::Border::default().rounded(4),
+            ..container::Style::default()
+        });
+        
+        // Card content layout
+        let card_content = column![
+            image_container,
+            Space::new().height(10),
+            container(title_text)
+                .width(Length::Fixed(card_width as f32))
+                .height(36), // Fixed height for ~2 lines
+            Space::new().height(4),
+            store_badge,
         ]
-        .width(card_width);
+        .width(Length::Fixed(card_width as f32));
         
-        button(card)
-            .padding(0)
+        // Wrap in button for interactivity
+        button(card_content)
+            .padding(8)
             .on_press(Message::GameClicked(game_clone))
-            .width(card_width)
+            .width(Length::Fixed(card_width as f32))
             .style(move |_, status| {
                 let hovered = status == iced_widget::button::Status::Hovered;
+                let pressed = status == iced_widget::button::Status::Pressed;
+                
                 button::Style {
-                    background: Some(if hovered {
-                        Color::from_rgb(0.2, 0.2, 0.25).into()
+                    background: Some(if pressed {
+                        Color::from_rgb(0.1, 0.1, 0.12).into()
+                    } else if hovered {
+                        card_bg_hover.into()
                     } else {
                         Color::TRANSPARENT.into()
                     }),
                     text_color: Color::WHITE,
                     border: iced_core::Border {
-                        color: if hovered { Color::from_rgb(0.467, 0.784, 0.196) } else { Color::TRANSPARENT },
-                        width: if hovered { 1.5 } else { 0.0 },
-                        radius: 8.0.into(),
+                        color: if hovered || pressed { 
+                            gfn_green 
+                        } else { 
+                            Color::TRANSPARENT 
+                        },
+                        width: if hovered || pressed { 2.0 } else { 0.0 },
+                        radius: 12.0.into(),
                     },
                     shadow: if hovered {
                         iced_core::Shadow {
-                            color: Color::from_rgba(0.0, 0.0, 0.0, 0.5),
+                            color: Color::from_rgba(0.467, 0.784, 0.196, 0.25), // Green glow
                             offset: iced_core::Vector::new(0.0, 4.0),
-                            blur_radius: 12.0,
+                            blur_radius: 16.0,
                         }
                     } else {
                         iced_core::Shadow::default()
@@ -1243,9 +1346,9 @@ impl Controls {
         &'a self,
         servers: &'a [ServerInfo],
         selected_server_index: usize,
-        _subscription: Option<&'a SubscriptionInfo>,
+        subscription: Option<&'a SubscriptionInfo>,
     ) -> Element<'a, Message, Theme, Renderer> {
-        let section_title_color = Color::from_rgb(0.467, 0.784, 0.196); // GFN Green
+        let _section_title_color = Color::from_rgb(0.467, 0.784, 0.196); // GFN Green
         let label_width = 140;
         
         // Helper to create a section card
@@ -1298,6 +1401,88 @@ impl Controls {
                 }),
         ].align_y(Alignment::Center);
         
+        // === BUILD RESOLUTION OPTIONS FROM SUBSCRIPTION ===
+        // Group entitled resolutions by aspect ratio
+        let (resolution_options, fps_options) = if let Some(sub) = subscription {
+            if !sub.entitled_resolutions.is_empty() {
+                // Build unique resolutions grouped by aspect ratio
+                let mut unique_resolutions: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
+                let mut resolutions: Vec<(u32, u32, String)> = Vec::new(); // (width, height, display_name)
+                
+                // Sort by width then height descending
+                let mut sorted_res = sub.entitled_resolutions.clone();
+                sorted_res.sort_by(|a, b| b.width.cmp(&a.width).then(b.height.cmp(&a.height)));
+                
+                for res in sorted_res {
+                    let key = (res.width, res.height);
+                    if unique_resolutions.contains(&key) {
+                        continue;
+                    }
+                    unique_resolutions.insert(key);
+                    
+                    // Calculate aspect ratio category
+                    let ratio = res.width as f32 / res.height as f32;
+                    let category = if (ratio - 16.0/9.0).abs() < 0.05 {
+                        "16:9"
+                    } else if (ratio - 16.0/10.0).abs() < 0.05 {
+                        "16:10"
+                    } else if (ratio - 21.0/9.0).abs() < 0.05 {
+                        "21:9"
+                    } else if (ratio - 32.0/9.0).abs() < 0.05 {
+                        "32:9"
+                    } else if (ratio - 4.0/3.0).abs() < 0.05 {
+                        "4:3"
+                    } else {
+                        "Other"
+                    };
+                    
+                    // Friendly name
+                    let name = match (res.width, res.height) {
+                        (1280, 720) => format!("1280x720 - 720p HD [{}]", category),
+                        (1600, 900) => format!("1600x900 - 900p [{}]", category),
+                        (1920, 1080) => format!("1920x1080 - 1080p FHD [{}]", category),
+                        (2560, 1440) => format!("2560x1440 - 1440p QHD [{}]", category),
+                        (3840, 2160) => format!("3840x2160 - 4K UHD [{}]", category),
+                        (2560, 1080) => format!("2560x1080 - Ultrawide [{}]", category),
+                        (3440, 1440) => format!("3440x1440 - Ultrawide QHD [{}]", category),
+                        (5120, 1440) => format!("5120x1440 - Super Ultrawide [{}]", category),
+                        (w, h) => format!("{}x{} [{}]", w, h, category),
+                    };
+                    
+                    resolutions.push((res.width, res.height, name));
+                }
+                
+                // Build FPS options for current resolution
+                let (current_w, current_h) = crate::app::parse_resolution(&self.settings.resolution);
+                let mut available_fps: Vec<u32> = sub.entitled_resolutions
+                    .iter()
+                    .filter(|r| r.width == current_w && r.height == current_h)
+                    .map(|r| r.fps)
+                    .collect();
+                
+                // If no FPS for this resolution, use all available FPS
+                if available_fps.is_empty() {
+                    available_fps = sub.entitled_resolutions.iter().map(|r| r.fps).collect();
+                }
+                available_fps.sort();
+                available_fps.dedup();
+                
+                let res_strings: Vec<String> = resolutions.iter().map(|(_, _, name)| name.clone()).collect();
+                (res_strings, available_fps)
+            } else {
+                // Fallback to static resolutions
+                (self.settings.aspect_ratio.resolutions().iter().map(|(r, label)| format!("{} ({})", r, label)).collect(), FPS_OPTIONS.to_vec())
+            }
+        } else {
+            // No subscription, use static fallback
+            (self.settings.aspect_ratio.resolutions().iter().map(|(r, label)| format!("{} ({})", r, label)).collect(), FPS_OPTIONS.to_vec())
+        };
+        
+        // Find current resolution in options
+        let current_resolution = resolution_options.iter()
+            .find(|r| r.starts_with(&self.settings.resolution))
+            .cloned();
+        
         // === VIDEO SETTINGS ===
         let codec_options: Vec<String> = VideoCodec::all().iter().map(|c| c.as_str().to_string()).collect();
         let current_codec = self.settings.codec.as_str().to_string();
@@ -1328,21 +1513,28 @@ impl Controls {
             ].align_y(Alignment::Center),
             Space::new().height(16),
             
-            // Resolution  
+            // Resolution - populated from subscription entitled resolutions
             row![
                 text("Resolution").size(14).color(Color::from_rgb(0.8, 0.8, 0.8)).width(label_width),
                 pick_list(
-                    RESOLUTIONS.iter().map(|(r, _)| r.to_string()).collect::<Vec<_>>(),
-                    Some(self.settings.resolution.clone()),
-                    Message::ResolutionChanged,
+                    resolution_options,
+                    current_resolution,
+                    |selected: String| {
+                        // Extract the resolution part (e.g., "1920x1080" from "1920x1080 - 1080p FHD [16:9]")
+                        let res = selected.split(" - ").next()
+                            .or_else(|| selected.split(" (").next())
+                            .unwrap_or(&selected)
+                            .to_string();
+                        Message::ResolutionChanged(res)
+                    },
                 ).width(Length::Fill).text_size(14),
             ].align_y(Alignment::Center),
             Space::new().height(12),
             
-            // FPS
+            // FPS - populated from subscription for current resolution
             row![
                 text("Frame Rate").size(14).color(Color::from_rgb(0.8, 0.8, 0.8)).width(label_width),
-                pick_list(FPS_OPTIONS.to_vec(), Some(self.settings.fps), Message::FpsChanged)
+                pick_list(fps_options, Some(self.settings.fps), Message::FpsChanged)
                     .width(Length::Fill).text_size(14),
             ].align_y(Alignment::Center),
             Space::new().height(12),
