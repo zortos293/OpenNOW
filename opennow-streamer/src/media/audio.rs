@@ -1,8 +1,7 @@
 //! Audio Decoder and Player
 //!
 //! Decode Opus audio and play through cpal.
-//! - macOS: Uses FFmpeg for Opus decoding
-//! - Linux/Windows: Uses GStreamer for Opus decoding
+//! All platforms now use GStreamer for Opus decoding.
 //! Optimized for low-latency streaming with jitter buffer.
 //! Supports dynamic device switching and sample rate conversion.
 
@@ -13,18 +12,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-
-// ============================================================================
-// macOS: FFmpeg-based Opus decoder
-// ============================================================================
-
-#[cfg(target_os = "macos")]
-extern crate ffmpeg_next as ffmpeg;
-
-#[cfg(target_os = "macos")]
-use ffmpeg::codec::{context::Context as CodecContext, decoder};
-#[cfg(target_os = "macos")]
-use ffmpeg::Packet;
 
 /// Audio decoder - platform-specific implementation
 /// Non-blocking: decoded samples are sent to a channel
@@ -43,233 +30,10 @@ enum AudioCommand {
 }
 
 // ============================================================================
-// macOS implementation using FFmpeg
+// GStreamer-based Opus decoder (all platforms: macOS, Linux, Windows x64)
 // ============================================================================
 
-#[cfg(target_os = "macos")]
-impl AudioDecoder {
-    /// Create a new Opus audio decoder using FFmpeg (macOS)
-    /// Returns decoder and a receiver for decoded samples (for async operation)
-    pub fn new(sample_rate: u32, channels: u32) -> Result<Self> {
-        info!(
-            "Creating Opus audio decoder (FFmpeg): {}Hz, {} channels",
-            sample_rate, channels
-        );
-
-        // Initialize FFmpeg (may already be initialized by video decoder)
-        let _ = ffmpeg::init();
-
-        // Create channels for thread communication
-        let (cmd_tx, cmd_rx) = mpsc::channel::<AudioCommand>();
-        // Async channel for decoded samples - large buffer to prevent blocking
-        let (sample_tx, sample_rx) = tokio::sync::mpsc::channel::<Vec<i16>>(512);
-
-        // Spawn decoder thread (FFmpeg types are not Send)
-        let sample_rate_clone = sample_rate;
-        let channels_clone = channels;
-
-        thread::spawn(move || {
-            // Find Opus decoder
-            let codec = match ffmpeg::codec::decoder::find(ffmpeg::codec::Id::OPUS) {
-                Some(c) => c,
-                None => {
-                    error!("Opus decoder not found in FFmpeg");
-                    return;
-                }
-            };
-
-            let ctx = CodecContext::new_with_codec(codec);
-
-            let mut decoder = match ctx.decoder().audio() {
-                Ok(d) => d,
-                Err(e) => {
-                    error!("Failed to create Opus decoder: {:?}", e);
-                    return;
-                }
-            };
-
-            info!("Opus audio decoder initialized (FFmpeg, async mode)");
-
-            while let Ok(cmd) = cmd_rx.recv() {
-                match cmd {
-                    AudioCommand::DecodeAsync(data) => {
-                        let samples = Self::decode_opus_packet(
-                            &mut decoder,
-                            &data,
-                            sample_rate_clone,
-                            channels_clone,
-                        );
-                        if !samples.is_empty() {
-                            // Non-blocking send - drop samples if channel is full
-                            let _ = sample_tx.try_send(samples);
-                        }
-                    }
-                    AudioCommand::Stop => break,
-                }
-            }
-
-            debug!("Audio decoder thread stopped");
-        });
-
-        Ok(Self {
-            cmd_tx,
-            sample_rx: Some(sample_rx),
-            sample_rate,
-            channels,
-        })
-    }
-
-    /// Take the sample receiver (for passing to audio player thread)
-    pub fn take_sample_receiver(&mut self) -> Option<tokio::sync::mpsc::Receiver<Vec<i16>>> {
-        self.sample_rx.take()
-    }
-
-    /// Decode an Opus packet from RTP payload
-    fn decode_opus_packet(
-        decoder: &mut decoder::Audio,
-        data: &[u8],
-        target_sample_rate: u32,
-        target_channels: u32,
-    ) -> Vec<i16> {
-        if data.is_empty() {
-            return Vec::new();
-        }
-
-        // Create packet from raw Opus data
-        let mut packet = Packet::new(data.len());
-        if let Some(pkt_data) = packet.data_mut() {
-            pkt_data.copy_from_slice(data);
-        } else {
-            return Vec::new();
-        }
-
-        // Send packet to decoder
-        if let Err(e) = decoder.send_packet(&packet) {
-            match e {
-                ffmpeg::Error::Other { errno } if errno == libc::EAGAIN => {}
-                _ => debug!("Audio send packet error: {:?}", e),
-            }
-        }
-
-        // Receive decoded audio frame
-        let mut frame = ffmpeg::frame::Audio::empty();
-        match decoder.receive_frame(&mut frame) {
-            Ok(_) => {
-                // Convert frame to i16 samples
-                let samples = Self::frame_to_samples(&frame, target_sample_rate, target_channels);
-                samples
-            }
-            Err(ffmpeg::Error::Other { errno }) if errno == libc::EAGAIN => Vec::new(),
-            Err(e) => {
-                debug!("Audio receive frame error: {:?}", e);
-                Vec::new()
-            }
-        }
-    }
-
-    /// Convert FFmpeg audio frame to i16 samples
-    fn frame_to_samples(
-        frame: &ffmpeg::frame::Audio,
-        _target_sample_rate: u32,
-        target_channels: u32,
-    ) -> Vec<i16> {
-        use ffmpeg::format::Sample;
-
-        let nb_samples = frame.samples();
-        let channels = frame.channels() as usize;
-
-        if nb_samples == 0 || channels == 0 {
-            return Vec::new();
-        }
-
-        let format = frame.format();
-        let mut output = Vec::with_capacity(nb_samples * target_channels as usize);
-
-        // Handle different sample formats
-        match format {
-            Sample::I16(planar) => {
-                if planar == ffmpeg::format::sample::Type::Planar {
-                    // Planar format - interleave channels
-                    for i in 0..nb_samples {
-                        for ch in 0..channels.min(target_channels as usize) {
-                            let plane = frame.plane::<i16>(ch);
-                            if i < plane.len() {
-                                output.push(plane[i]);
-                            }
-                        }
-                        // Fill remaining channels with zeros if needed
-                        for _ in channels..target_channels as usize {
-                            output.push(0);
-                        }
-                    }
-                } else {
-                    // Packed format - already interleaved
-                    let data = frame.plane::<i16>(0);
-                    output.extend_from_slice(&data[..nb_samples * channels]);
-                }
-            }
-            Sample::F32(planar) => {
-                // Convert f32 to i16
-                if planar == ffmpeg::format::sample::Type::Planar {
-                    for i in 0..nb_samples {
-                        for ch in 0..channels.min(target_channels as usize) {
-                            let plane = frame.plane::<f32>(ch);
-                            if i < plane.len() {
-                                let sample = (plane[i] * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                                output.push(sample);
-                            }
-                        }
-                        for _ in channels..target_channels as usize {
-                            output.push(0);
-                        }
-                    }
-                } else {
-                    let data = frame.plane::<f32>(0);
-                    for sample in &data[..nb_samples * channels] {
-                        let s = (*sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                        output.push(s);
-                    }
-                }
-            }
-            _ => {
-                // For other formats, try to get as bytes and convert
-                debug!("Unsupported audio format: {:?}, returning silence", format);
-                output.resize(nb_samples * target_channels as usize, 0);
-            }
-        }
-
-        output
-    }
-
-    /// Decode an Opus packet asynchronously (non-blocking, fire-and-forget)
-    /// Decoded samples are sent to the sample_rx channel
-    pub fn decode_async(&self, data: &[u8]) {
-        let _ = self.cmd_tx.send(AudioCommand::DecodeAsync(data.to_vec()));
-    }
-
-    /// Get sample rate
-    pub fn sample_rate(&self) -> u32 {
-        self.sample_rate
-    }
-
-    /// Get channel count
-    pub fn channels(&self) -> u32 {
-        self.channels
-    }
-}
-
-#[cfg(target_os = "macos")]
-impl Drop for AudioDecoder {
-    fn drop(&mut self) {
-        let _ = self.cmd_tx.send(AudioCommand::Stop);
-    }
-}
-
-// ============================================================================
-// Linux/Windows x64 implementation using GStreamer
-// ============================================================================
-
-#[cfg(any(target_os = "linux", all(windows, target_arch = "x86_64")))]
+#[cfg(any(target_os = "macos", target_os = "linux", all(windows, target_arch = "x86_64")))]
 impl AudioDecoder {
     /// Create a new Opus audio decoder using GStreamer (Linux/Windows x64)
     /// Returns decoder and a receiver for decoded samples (for async operation)
@@ -476,7 +240,7 @@ impl AudioDecoder {
     }
 }
 
-#[cfg(any(target_os = "linux", all(windows, target_arch = "x86_64")))]
+#[cfg(any(target_os = "macos", target_os = "linux", all(windows, target_arch = "x86_64")))]
 impl Drop for AudioDecoder {
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(AudioCommand::Stop);
