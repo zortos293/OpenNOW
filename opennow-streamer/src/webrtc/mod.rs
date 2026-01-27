@@ -32,7 +32,8 @@ pub enum StreamingResult {
 }
 use crate::input::{ControllerManager, FfbEffectType, G29FfbManager, InputHandler, WheelManager};
 use crate::media::{
-    AudioDecoder, AudioPlayer, DepacketizerCodec, RtpDepacketizer, StreamStats, UnifiedVideoDecoder,
+    AudioDecoder, AudioPlayer, DecodeStats, DepacketizerCodec, RtpDepacketizer, StreamStats,
+    UnifiedVideoDecoder,
 };
 
 /// Active streaming session
@@ -269,6 +270,16 @@ fn extract_public_ip(input: &str) -> Option<String> {
     None
 }
 
+/// Parse codec name from SDP into VideoCodec
+fn parse_video_codec_name(name: &str) -> Option<VideoCodec> {
+    match name.trim().to_uppercase().as_str() {
+        "H264" => Some(VideoCodec::H264),
+        "H265" | "HEVC" => Some(VideoCodec::H265),
+        "AV1" => Some(VideoCodec::AV1),
+        _ => None,
+    }
+}
+
 /// Run the streaming session
 /// Returns a `StreamingResult` indicating how/why the session ended
 pub async fn run_streaming(
@@ -286,8 +297,8 @@ pub async fn run_streaming(
     let (width, height) = settings.resolution_tuple();
     let fps = settings.fps;
     let max_bitrate = settings.max_bitrate_kbps();
-    let codec = settings.codec;
-    let _codec_str = codec.as_str().to_string();
+    let preferred_codec = settings.codec;
+    let _codec_str = preferred_codec.as_str().to_string();
 
     // Create signaling client
     let (sig_event_tx, mut sig_event_rx) = mpsc::channel::<SignalingEvent>(64);
@@ -314,26 +325,13 @@ pub async fn run_streaming(
     let (peer_event_tx, mut peer_event_rx) = mpsc::channel(64);
     let mut peer = WebRtcPeer::new(peer_event_tx);
 
-    // Video decoder - use async mode for non-blocking decode
-    // Decoded frames are written directly to SharedFrame by the decoder thread
-    // Uses UnifiedVideoDecoder to support both FFmpeg and native DXVA backends
-    let (mut video_decoder, mut decode_stats_rx) =
-        match UnifiedVideoDecoder::new_async(codec, settings.decoder_backend, shared_frame.clone())
-        {
-            Ok(decoder) => decoder,
-            Err(e) => {
-                return StreamingResult::Error(format!("Failed to create video decoder: {}", e))
-            }
-        };
-
-    // Create RTP depacketizer with correct codec
-    let depacketizer_codec = match codec {
-        VideoCodec::H264 => DepacketizerCodec::H264,
-        VideoCodec::H265 => DepacketizerCodec::H265,
-        VideoCodec::AV1 => DepacketizerCodec::AV1,
-    };
-    let mut rtp_depacketizer = RtpDepacketizer::with_codec(depacketizer_codec);
-    info!("RTP depacketizer using {:?} mode", depacketizer_codec);
+    // Video decoder / depacketizer are initialized after SDP offer
+    // (so we match the negotiated codec instead of the user preference).
+    let mut negotiated_codec: Option<VideoCodec> = None;
+    let mut video_decoder: Option<UnifiedVideoDecoder> = None;
+    let mut decode_stats_rx: Option<mpsc::Receiver<DecodeStats>> = None;
+    let mut depacketizer_codec: Option<DepacketizerCodec> = None;
+    let mut rtp_depacketizer: Option<RtpDepacketizer> = None;
 
     let mut audio_decoder = match AudioDecoder::new(48000, 2) {
         Ok(decoder) => decoder,
@@ -598,7 +596,7 @@ pub async fn run_streaming(
                     SignalingEvent::SdpOffer(sdp) => {
                         info!("Received SDP offer, length: {}", sdp.len());
 
-                        // Detect codec to use
+                        // Detect codec to use (preference only)
                         let codec = match settings.codec {
                             VideoCodec::H264 => "H264",
                             VideoCodec::H265 => "H265",
@@ -627,6 +625,67 @@ pub async fn run_streaming(
 
                         // Prefer codec
                         let modified_sdp = prefer_codec(&modified_sdp, &settings.codec);
+
+                        // Determine negotiated codec from (possibly filtered) SDP offer
+                        let negotiated = extract_video_codec(&modified_sdp)
+                            .and_then(|name| parse_video_codec_name(&name))
+                            .unwrap_or(preferred_codec);
+
+                        let codec_switched =
+                            negotiated_codec.is_some() && negotiated_codec != Some(negotiated);
+
+                        // (Re)initialize decoder + depacketizer if codec differs or not ready
+                        if negotiated_codec != Some(negotiated) {
+                            if codec_switched {
+                                warn!(
+                                    "Codec switch detected: {:?} -> {:?}. Reinitializing decoder and depacketizer.",
+                                    negotiated_codec.unwrap(),
+                                    negotiated
+                                );
+                            } else {
+                                info!(
+                                    "Negotiated video codec: {:?} (preferred: {:?})",
+                                    negotiated, preferred_codec
+                                );
+                            }
+
+                            match UnifiedVideoDecoder::new_async(
+                                negotiated,
+                                settings.decoder_backend,
+                                shared_frame.clone(),
+                            ) {
+                                Ok((decoder, stats_rx)) => {
+                                    video_decoder = Some(decoder);
+                                    decode_stats_rx = Some(stats_rx);
+                                }
+                                Err(e) => {
+                                    error!("Failed to create video decoder: {}", e);
+                                    // Stop input managers before returning
+                                    controller_manager.stop();
+                                    wheel_manager.stop();
+                                    g29_ffb.stop();
+
+                                    #[cfg(any(target_os = "windows", target_os = "macos"))]
+                                    crate::input::clear_raw_input_sender();
+
+                                    return StreamingResult::Error(format!(
+                                        "Failed to create video decoder: {}",
+                                        e
+                                    ));
+                                }
+                            }
+
+                            let dep_codec = match negotiated {
+                                VideoCodec::H264 => DepacketizerCodec::H264,
+                                VideoCodec::H265 => DepacketizerCodec::H265,
+                                VideoCodec::AV1 => DepacketizerCodec::AV1,
+                            };
+                            depacketizer_codec = Some(dep_codec);
+                            rtp_depacketizer = Some(RtpDepacketizer::with_codec(dep_codec));
+                            info!("RTP depacketizer using {:?} mode", dep_codec);
+
+                            negotiated_codec = Some(negotiated);
+                        }
 
                         // CRITICAL: Create input channel BEFORE SDP negotiation (per GFN protocol)
                         info!("Creating input channel BEFORE SDP negotiation...");
@@ -692,6 +751,11 @@ pub async fn run_streaming(
                                     error!("Failed to send SDP answer: {}", e);
                                 }
 
+                                if codec_switched {
+                                    // Request a keyframe to speed up recovery after codec switch
+                                    request_keyframe().await;
+                                }
+
                                 // For resume flow or Alliance partners (manual candidate needed)
                                 if let Some(ref mci) = session_info.media_connection_info {
                                     info!("Using media port {} from session API", mci.port);
@@ -734,7 +798,8 @@ pub async fn run_streaming(
                                 }
 
                                 // Update stats with codec info
-                                stats.codec = codec.to_string();
+                                let stats_codec = negotiated_codec.unwrap_or(preferred_codec);
+                                stats.codec = stats_codec.as_str().to_string();
                                 stats.resolution = format!("{}x{}", width, height);
                                 stats.target_fps = fps;
                             }
@@ -788,6 +853,22 @@ pub async fn run_streaming(
                             info!("First video RTP packet received: {} bytes", payload.len());
                         }
 
+                        // Decoder may not be initialized yet (waiting for SDP)
+                        let (Some(video_decoder), Some(rtp_depacketizer), Some(depacketizer_codec)) =
+                            (video_decoder.as_mut(), rtp_depacketizer.as_mut(), depacketizer_codec)
+                        else {
+                            static VIDEO_NOT_READY_LOGGED: std::sync::atomic::AtomicBool =
+                                std::sync::atomic::AtomicBool::new(false);
+                            if !VIDEO_NOT_READY_LOGGED
+                                .swap(true, std::sync::atomic::Ordering::Relaxed)
+                            {
+                                warn!(
+                                    "Video packet received before decoder initialized; dropping frames until SDP negotiation completes"
+                                );
+                            }
+                            continue;
+                        };
+
                         // Handle codec-specific depacketization
                         match depacketizer_codec {
                             DepacketizerCodec::AV1 => {
@@ -817,7 +898,9 @@ pub async fn run_streaming(
                                 // On marker bit, we have a complete Access Unit - send to decoder
                                 if marker {
                                     if let Some(frame_data) = rtp_depacketizer.take_nal_frame() {
-                                        if let Err(e) = video_decoder.decode_async(&frame_data, packet_receive_time) {
+                                        if let Err(e) =
+                                            video_decoder.decode_async(&frame_data, packet_receive_time)
+                                        {
                                             warn!("Decode async failed: {}", e);
                                         }
                                     }
@@ -975,7 +1058,12 @@ pub async fn run_streaming(
                 }
             }
             // Receive decode stats from the decoder thread (non-blocking)
-            Some(decode_stat) = decode_stats_rx.recv() => {
+            Some(decode_stat) = async {
+                match decode_stats_rx.as_mut() {
+                    Some(rx) => rx.recv().await,
+                    None => std::future::pending::<Option<DecodeStats>>().await,
+                }
+            } => {
                 if decode_stat.frame_produced {
                     frames_decoded += 1;
 
@@ -995,7 +1083,9 @@ pub async fn run_streaming(
                 if decode_stat.needs_keyframe {
                     // Reset depacketizer state to clear any corrupted fragment state
                     // This is critical for recovering from packet loss/corruption
-                    rtp_depacketizer.reset_state();
+                    if let Some(ref mut depacketizer) = rtp_depacketizer {
+                        depacketizer.reset_state();
+                    }
                     request_keyframe().await;
                 }
             }

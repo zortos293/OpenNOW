@@ -75,6 +75,7 @@ parking_lot = "0.12"
 
 # Logitech G29 steering wheel support (force feedback via HID)
 g29 = "0.2"
+hidapi = "2.5.0"
 bytes = "1"
 base64 = "0.22"
 sha2 = "0.10"

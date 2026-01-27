@@ -3740,6 +3740,7 @@ dependencies = [
  "gstreamer-app",
  "gstreamer-video",
  "hex",
+ "hidapi",
  "http",
  "iced_core",
  "iced_futures",

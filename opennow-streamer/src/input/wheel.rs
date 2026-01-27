@@ -643,10 +643,13 @@ mod fallback_impl {
 /// This works when the G29 is in PS3 mode and provides direct FFB control
 mod g29_ffb {
     use g29::interface::G29Interface;
+    use hidapi::HidApi;
     use log::{debug, info};
     use parking_lot::Mutex;
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
+    const G29_VID: u16 = 0x046d;
+    const G29_PID: u16 = 0xc24f;
 
     /// G29 Force Feedback Manager
     /// Uses the g29 crate for HID-based force feedback control
@@ -676,6 +679,23 @@ mod g29_ffb {
 
             info!("Attempting to connect to Logitech G29 via HID...");
             info!("Note: G29 must be in PS3 mode (switch on wheel) for HID FFB to work");
+
+            // Avoid triggering g29's internal unwrap panic by probing HID first.
+            let has_g29 = match HidApi::new() {
+                Ok(api) => api
+                    .device_list()
+                    .any(|d| d.vendor_id() == G29_VID && d.product_id() == G29_PID),
+                Err(e) => {
+                    debug!("Failed to initialize HID API for G29 probe: {}", e);
+                    false
+                }
+            };
+
+            if !has_g29 {
+                info!("G29 not found via HID (VID/PID not present)");
+                self.connected.store(false, Ordering::Relaxed);
+                return false;
+            }
 
             // G29Interface::new() panics on failure, so we catch it
             let result = catch_unwind(AssertUnwindSafe(|| G29Interface::new()));
